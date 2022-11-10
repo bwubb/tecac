@@ -100,10 +100,11 @@ def main(argv=None):
     for n,file in enumerate(argv['input_fp']):
         #print(n+1,file)
         debug=read_stats(file,pull_from)
+        k=list(debug.keys())[0]
         for label in ['#SNVs','#INDELs','Ti:Tv','Het:Hom','Ins:Del']:
-            if label not in debug.keys():
+            if label not in debug[k]:
                 print(f"{file} is missing {label}")
-        input_values.update(debug)    
+        input_values.update(debug)
         #input_values.update(read_stats(file,pull_from))
     #print(input_values)
     csv_header=['sample_id']
