@@ -99,7 +99,12 @@ def main(argv=None):
     pull_from=these_stats()
     for n,file in enumerate(argv['input_fp']):
         #print(n+1,file)
-        input_values.update(read_stats(file,pull_from))
+        debug=read_stats(file,pull_from)
+        for label in ['#SNVs','#INDELs','Ti:Tv','Het:Hom','Ins:Del']:
+            if label not in debug.keys():
+                print(f"{file} is missing {label}")
+        input_values.update(debug)    
+        #input_values.update(read_stats(file,pull_from))
     #print(input_values)
     csv_header=['sample_id']
     with open('vcf_stats/stats_filter.txt','w') as filter_file:

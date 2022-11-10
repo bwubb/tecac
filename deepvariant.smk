@@ -12,6 +12,8 @@ with open(config['project']['bam_table'],'r') as b:
 def bam_input(wildcards):
     return BAMS[wildcards.sample]
 
+localrules:run_qc_stats
+
 rule all_deepvariant:
     input:
         expand("data/work/{sample}/deep_variant.output.vcf.gz",sample=SAMPLES)
@@ -47,7 +49,8 @@ rule run_deepvariant:
           --output_vcf={output.vcf} \
           --output_gvcf={output.g_vcf} \
           --intermediate_results_dir={params.tmp} \
-          --num_shards={threads}
+          --num_shards={threads} \
+          --sample_name={wildcards.sample}
         """
 
 rule run_bcftools_stats:
@@ -57,7 +60,7 @@ rule run_bcftools_stats:
         "data/work/{sample}/deep_variant.pass.bcftools_stats.output"
     shell:
         """
-        bcftools view -i \"%FILTER='PASS'\" -s {wildcards.sample} {input} | bcftools stats -s- > {output}
+        bcftools view -i '%FILTER=\"PASS\"' -s {wildcards.sample} {input} | bcftools stats -s- > {output}
         """
         #There appears a bug in bcftools stats.
         #If I use the -i EXPRESSION option it will not count the PSI and PSC values.

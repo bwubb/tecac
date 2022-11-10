@@ -1,0 +1,11 @@
+__default__':
+    'M': '6144'
+    'n': '1'
+    'J': '{wildcards.sample}_{rule}'
+    'eo': 'logs/cluster/{wildcards.sample}/{rule}.e'
+    'oo': 'logs/cluster/{wildcards.sample}/{rule}.o'
+    'R': '"span [hosts=1] rusage [mem=6144]"'
+run_deepvariant:
+    'M': '32768'
+    'n': '4'
+    'R': '"span [hosts=1] rusage [mem=32768]"'
