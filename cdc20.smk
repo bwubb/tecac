@@ -54,6 +54,7 @@ rule annotate_vep:
         --cache \
         --format vcf \
         --vcf \
+        --vcf_field_info ANN \
         --everything \
         --canonical \
         --assembly {params.assembly} \
