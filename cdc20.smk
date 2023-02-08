@@ -79,7 +79,7 @@ rule vep_report_cdc20:
         "analysis/work/{sample}/CDC20/deep_variant.CDC20.PASS.vep.report.csv"
     shell:
         """
-        python vep_vcf_parser.py -i {input} -o {output} --mode single,{wildcards.sample} everything
+        python ./vep_vcf_parser.py -i {input} -o {output} --mode single,{wildcards.sample} everything
         """
 
 rule merge_csv:
