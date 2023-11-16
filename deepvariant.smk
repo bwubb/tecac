@@ -9,6 +9,12 @@ with open(config.get('project',{}).get('sample_list','samples.list'),'r') as i:
 with open(config['project']['bam_table'],'r') as b:
     BAMS=dict(line.split('\t') for line in b.read().splitlines())
 
+if os.path.isfile('pass_samples.list'):
+    with open('pass_samples.list','r') as i:
+        PASS_SAMPLES=i.read().splitlines()
+else:
+    PASS_SAMPLES=[]
+
 def bam_input(wildcards):
     return BAMS[wildcards.sample]
 
@@ -17,6 +23,10 @@ localrules:run_qc_stats
 rule all_deepvariant:
     input:
         expand("data/work/{sample}/deep_variant.output.vcf.gz",sample=SAMPLES)
+
+rule chromosome_gvcf:
+    input:
+        expand("input_data/{chr}/{sample}.deep_variant.output.{chr}.g.vcf.gz",sample=PASS_SAMPLES,chr=list(range(1,23))+['X','Y'])
 
 rule stats_filter:
     input:
@@ -39,9 +49,11 @@ rule run_deepvariant:
         """
         mkdir -p {params.outdir}
 
-        singularity run -B /usr/lib/locale/:/usr/lib/locale/ \
-          docker://google/deepvariant:"1.4.0" \
-          /opt/deepvariant/bin/run_deepvariant \
+        #singularity run -B /usr/lib/locale/:/usr/lib/locale/ \
+        #  docker://google/deepvariant:"1.4.0" \
+        #  /opt/deepvariant/bin/run_deepvariant \
+        singularity run  --bind /scratch:/scratch --bind /home/bwubb:/home/bwubb /appl/containers/deepvariant_1.4.0.sif \
+          run_deepvariant \
           --model_type=WES \
           --ref={params.ref} \
           --reads={input.bam} \
@@ -75,4 +87,14 @@ rule run_qc_stats:
     shell:
         """
         python qc_stats.py {input}
+        """
+
+rule split_gvcf:
+    input:
+        "data/work/{sample}/deep_variant.output.g.vcf.gz"
+    output:
+        "input_data/{chr}/{sample}.deep_variant.output.{chr}.g.vcf.gz"
+    shell:
+        """
+        bcftools view -O z -o {output} -r {wildcards.chr} {input}
         """
