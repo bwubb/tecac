@@ -25,13 +25,13 @@ rule deepvariant_vep:
         gnomAD=config['resources']['gnomAD'],
         clinvar=config['resources']['clinvar'],
         revel=config['resources']['revel'],
-        loftee='$HOME/.vep/Plugins/loftee',#check
-        human_ancestor_fa='$HOME/.vep/Plugins/loftee/human_ancestor.fa.gz',
-        conservation_file='$HOME/.vep/Plugins/loftee/loftee.sql',
-        gerp_bigwig='$HOME/.vep/Plugins/loftee/gerp_conservation_scores.homo_sapiens.GRCh38.bw',
+        loftee='/home/bwubb/.vep/Plugins/loftee',#check
+        human_ancestor_fa='/home/bwubb/.vep/Plugins/loftee/human_ancestor.fa.gz',
+        conservation_file='/home/bwubb/.vep/Plugins/loftee/loftee.sql',
+        gerp_bigwig='/home/bwubb/.vep/Plugins/loftee/gerp_conservation_scores.homo_sapiens.GRCh38.bw',
         utr=config['resources']['utrannotator'],
-        alphamissense='$HOME/.vep/alphamissense/AlphaMissense_hg38.tsv.gz',
-        mavedb='$HOME/.vep/mavedb/MaveDB_variants.tsv.gz'
+        alphamissense='/home/bwubb/.vep/alphamissense/AlphaMissense_GRCh38.tsv.gz',
+        mavedb='/home/bwubb/.vep/mavedb/MaveDB_variants.tsv.gz'
     shell:
         """
         vep -i {input} -o {params.out_vcf} \
@@ -51,6 +51,7 @@ rule deepvariant_vep:
         --plugin SpliceAI,snv={params.splice_snv},indel={params.splice_indel} \
         --plugin gnomADc,{params.gnomAD} \
         --plugin UTRannotator,{params.utr} \
+        --plugin LoF,loftee_path:{params.loftee},human_ancestor_fa:{params.human_ancestor_fa},conservation_file:{params.conservation_file},gerp_bigwig:{params.gerp_bigwig} \
         --custom {params.clinvar},ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN \
         --plugin AlphaMissense,file={params.alphamissense} \
         --plugin MaveDB,file={params.mavedb}

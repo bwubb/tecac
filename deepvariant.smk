@@ -32,6 +32,10 @@ rule stats_filter:
     input:
         "vcf_stats/stats_filter.txt"
 
+
+#singularity run -B /usr/lib/locale/:/usr/lib/locale/ \
+#  docker://google/deepvariant:"1.4.0" \
+#  /opt/deepvariant/bin/run_deepvariant \
 rule run_deepvariant:
     input:
         bam=bam_input
@@ -47,11 +51,9 @@ rule run_deepvariant:
         4
     shell:
         """
+        #/appl/containers/deepvariant_1.6.0.sif
         mkdir -p {params.outdir}
 
-        #singularity run -B /usr/lib/locale/:/usr/lib/locale/ \
-        #  docker://google/deepvariant:"1.4.0" \
-        #  /opt/deepvariant/bin/run_deepvariant \
         singularity run  --bind /scratch:/scratch --bind /home/bwubb:/home/bwubb /appl/containers/deepvariant_1.4.0.sif \
           run_deepvariant \
           --model_type=WES \
