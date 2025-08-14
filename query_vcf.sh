@@ -1,5 +1,5 @@
 #!/bin/bash
-
+#This makes input for denisty plots
 
 i=$1
 o=$2

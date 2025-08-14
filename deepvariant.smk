@@ -74,8 +74,9 @@ rule run_bcftools_stats:
         "data/work/{sample}/deep_variant.pass.bcftools_stats.output"
     shell:
         """
-        bcftools view -i '%FILTER=\"PASS\"' -s {wildcards.sample} {input} | bcftools stats -s- > {output}
+        bcftools view -a -s {wildcards.sample} {input} | bcftools stats -s- > {output}
         """
+        #-i 'FILTER=\"PASS\"'
         #There appears a bug in bcftools stats.
         #If I use the -i EXPRESSION option it will not count the PSI and PSC values.
 

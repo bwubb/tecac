@@ -1,0 +1,362 @@
+---
+title: "REGENIE Exome-Wide Association Analysis Report"
+author: "Brad Wubbenhorst"
+output: 
+  html_document:
+    theme: paper
+    toc: true
+    toc_float: true
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+**Note:** This report is configured for Exome-Wide Association Studies (ExWAS) using Regenie burden and single-variant results.
+
+<!-- 
+NOTES TO SELF:
+- M1 = pathogenic variants only (LoF level 1)
+- M2 = VUS variants only (LoF level 2) 
+- M3 = pathogenic + VUS variants combined
+- ADD = additive burden test (use for BETA interpretation)
+- SKAT/SKATO = other burden tests (not used in this report)
+- Exome-wide significance = p < 2.5e-6 (not GWAS 5e-8)
+- Lambda GC less interpretable in ExWAS due to sparse rare variants
+
+KEY TERMS:
+- BETA (Effect Size): Log odds ratio of disease association for alt allele
+  * Positive BETA = alt allele increases disease risk
+  * Negative BETA = alt allele is protective
+- SE (Standard Error): Uncertainty around effect size estimate
+  * High SE = less confidence in BETA (common for rare variants)
+- PVAL/LOG10P: p-value from association test
+  * LOG10P = -log10(p-value) for plotting
+  * Smaller p-values (larger LOG10P) = stronger evidence
+- PVAL_ADJ/FDR: False discovery rate-adjusted p-values (Benjamini-Hochberg)
+  * Controls for multiple testing across thousands of variants/genes
+  * Prevents false positives from testing many hypotheses
+-->
+
+params:
+  single_variant_file: "step2_single_variant_STATUS.regenie"
+  gene_based_file: "step2_gene_based_STATUS.regenie"
+  pheno_file: "TECAC_WES.regenie.pheno.txt"
+  report_title: "REGENIE_20250319"
+
+```{r setup,echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 10, fig.height = 6)
+library(dplyr)
+library(readr)
+library(data.table)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(ggrepel)
+library(qqman)
+
+# Set consistent theme
+theme_set(theme_minimal(base_size = 12))
+```
+
+```{r load-data,echo=FALSE,message=FALSE,warning=FALSE}
+# Set file paths with fallbacks
+single_variant_file <- if(exists("params")) params$single_variant_file else "step2_single_variant_STATUS.regenie"
+gene_based_file <- if(exists("params")) params$gene_based_file else "step2_gene_based_STATUS.regenie"
+pheno_file <- if(exists("params")) params$pheno_file else "TECAC_WES.regenie.pheno.txt"
+
+# Load single variant data
+single_variant <- read_delim(single_variant_file, delim = " ", col_names = TRUE, trim_ws = TRUE) %>%
+   mutate(across(c(CHROM, GENPOS, N, N_CASES, N_CONTROLS), as.integer),
+         across(c(A1FREQ, A1FREQ_CASES, A1FREQ_CONTROLS, BETA, SE, CHISQ, LOG10P), as.numeric)) %>%
+  mutate(CHROM = as.factor(CHROM)) %>% 
+  arrange(CHROM, GENPOS) %>% 
+  mutate(PVAL = 10^(-LOG10P),
+         PVAL_ADJ = p.adjust(PVAL, method = "BH"),
+         LOG10P_ADJ = -log10(PVAL_ADJ)) %>%
+  mutate(POS_INDEX = row_number())
+
+# Load gene-based data
+gene_based <- read_delim(gene_based_file, delim = " ", col_names = TRUE, trim_ws = TRUE, skip = 1) %>%
+  mutate(across(c(CHROM, GENPOS, N, N_CASES, N_CONTROLS), as.integer),
+         across(c(A1FREQ, A1FREQ_CASES, A1FREQ_CONTROLS, BETA, SE, CHISQ, LOG10P), as.numeric)) %>%
+  mutate(CHROM = as.factor(CHROM),
+         PVAL = 10^(-LOG10P),
+         PVAL_ADJ = p.adjust(PVAL, method = "BH"),
+         LOG10P_ADJ = -log10(PVAL_ADJ),
+         OR = exp(BETA)) %>%
+  # Extract gene and mask information from ID column
+  mutate(
+    GENE = sub("\\..*", "", ID),
+    MASK = sub(".*\\.(M[0-9]+).*", "\\1", ID),
+    THRESH = sub(".*\\.(\\d+\\.\\d+)$", "\\1", ID)
+  ) %>%
+  # Filter to ADD test only for BETA-based analysis
+  filter(TEST == "ADD")
+```
+
+## Analysis Summary
+
+```{r summary-stats,echo=FALSE,message=FALSE,warning=FALSE}
+# Load phenotype file for actual case/control numbers
+pheno <- read_delim(pheno_file, delim = " ", col_names = TRUE, trim_ws = TRUE)
+
+# Build proper summary table with scalar values
+summary_df <- data.frame(
+  Metric = c("Total Samples", "Cases", "Controls", 
+             "Variants Tested (Single-Variant)", 
+             "Genes Tested (Burden Test)"),
+  Count = c(
+    length(unique(pheno$IID)),
+    sum(pheno$STATUS == 1),
+    sum(pheno$STATUS == 0),
+    nrow(single_variant),
+    length(unique(gene_based$GENE))  # important: gene count, not row count
+  )
+)
+
+kable(summary_df, format = "html", col.names = c("Metric", "Count")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  column_spec(1, bold = TRUE)
+```
+
+## Single-Variant Exome Association Results
+
+### Significant Variants (p < 2.5e-6)
+
+```{r significant-single,echo=FALSE,message=FALSE,warning=FALSE}
+# Filter significant variants
+significant_variants <- single_variant %>% 
+    filter(!is.na(LOG10P), LOG10P > 5.60206) %>%  # Exome-wide threshold ~2.5e-6
+    arrange(desc(LOG10P)) %>%
+    select(CHROM, GENPOS, ID, ALLELE1, A1FREQ, BETA, SE, LOG10P, PVAL, PVAL_ADJ, LOG10P_ADJ)
+
+if(nrow(significant_variants) > 0) {
+    kable(significant_variants[1:min(10, nrow(significant_variants)),], 
+          format = "html", digits = 4,
+          col.names = c("Chr", "Pos", "Variant ID", "Alt Allele", "Alt Freq", 
+                       "Beta", "SE", "-log10(P)", "P-value", "FDR P-value", "-log10(FDR P)")) %>%
+        kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+        column_spec(c(8, 10, 11), color = "red")
+} else {
+    cat("**No variants reached exome-wide significance (p < 2.5e-6)**")
+}
+```
+
+### Manhattan Plot
+
+```{r manhattan-plot,echo=FALSE,message=FALSE,warning=FALSE}
+# Manhattan Plot with improved styling
+chrom_colors <- rep(c("#2E86AB", "#FF6B35"), length.out = length(unique(single_variant$CHROM)))
+
+manhattan_plot <- ggplot(single_variant, aes(x = POS_INDEX, y = LOG10P, color = CHROM)) +
+    geom_point(alpha = 0.7, size = 0.8) +
+    scale_color_manual(values = chrom_colors) +
+    labs(title = "Manhattan Plot: Single-Variant Exome Association",
+         subtitle = paste("Total variants:", nrow(single_variant), "| Exome-wide significance threshold: p < 2.5e-6"),
+         x = "Genomic Position", y = "-log10(p-value)") +
+    geom_hline(yintercept = 5.602, color = "red", linetype = "dashed", size = 0.8) +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 14, face = "bold"),
+          plot.subtitle = element_text(size = 10, color = "gray50"))
+
+print(manhattan_plot)
+```
+
+### QQ Plot
+
+```{r qq-plot,echo=FALSE,message=FALSE,warning=FALSE}
+# QQ Plot for single variant p-values
+qq_data <- single_variant %>%
+    filter(!is.na(LOG10P)) %>%
+    arrange(desc(LOG10P)) %>%
+    mutate(
+        observed = sort(LOG10P, decreasing = TRUE),
+        expected = sort(-log10(ppoints(length(LOG10P))), decreasing = TRUE)
+    )
+
+# Calculate lambda GC correctly
+chisq <- qchisq(1 - single_variant$PVAL, 1)
+lambda_gc <- median(chisq, na.rm = TRUE) / qchisq(0.5, 1)
+
+qq_plot <- ggplot(qq_data, aes(x = expected, y = observed)) +
+    geom_point(alpha = 0.6, color = "#2E86AB") +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    labs(title = "Q-Q Plot: Single-Variant P-values",
+         subtitle = paste("Lambda GC:", round(lambda_gc, 3), "| Note: Inflation metrics are less interpretable in ExWAS due to sparse, low-frequency variant testing"),
+         x = "Expected -log10(p-value)", 
+         y = "Observed -log10(p-value)") +
+    theme(plot.title = element_text(size = 14, face = "bold"),
+          plot.subtitle = element_text(size = 10, color = "gray50"))
+
+print(qq_plot)
+```
+
+## Gene-Based Burden Testing Results
+
+### Summary by Mask
+
+```{r mask-summary,echo=FALSE,message=FALSE,warning=FALSE}
+# Summary statistics per mask
+mask_summary <- gene_based %>%
+  group_by(MASK) %>%
+  summarize(
+    Genes_Tested = n(),
+    Significant_Genes = sum(PVAL_ADJ < 0.05, na.rm = TRUE),
+    Most_Significant_Gene = GENE[which.max(LOG10P)],
+    Max_Log10P = max(LOG10P, na.rm = TRUE),
+    Mean_Beta = mean(BETA, na.rm = TRUE)
+  ) %>%
+  mutate(Significance_Rate = Significant_Genes / Genes_Tested * 100)
+
+kable(mask_summary, format = "html", digits = 3,
+      col.names = c("Mask", "Genes Tested", "FDR Significant", "Top Gene", "Max -log10(P)", "Mean Beta", "Significance Rate (%)")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  column_spec(1, bold = TRUE)
+```
+
+### Top 10 Genes by Mask
+
+```{r top-genes-by-mask,echo=FALSE,message=FALSE,warning=FALSE}
+# Get top 10 genes per mask
+top_genes_by_mask <- gene_based %>%
+  group_by(MASK) %>%
+  slice_max(LOG10P, n = 10) %>%
+  ungroup() %>%
+  select(MASK, GENE, THRESH, BETA, SE, LOG10P, PVAL, PVAL_ADJ, OR) %>%
+  arrange(MASK, desc(LOG10P))
+
+# Create a combined table with mask labels
+top_genes_display <- top_genes_by_mask %>%
+  mutate(
+    Mask_Label = case_when(
+      MASK == "M1" ~ "M1 (Pathogenic)",
+      MASK == "M2" ~ "M2 (VUS)", 
+      MASK == "M3" ~ "M3 (Pathogenic+VUS)",
+      TRUE ~ MASK
+    )
+  ) %>%
+  select(Mask_Label, GENE, THRESH, BETA, SE, LOG10P, PVAL, PVAL_ADJ, OR)
+
+kable(top_genes_display, format = "html", digits = 4,
+      col.names = c("Mask", "Gene", "Threshold", "Beta", "SE", "-log10(P)", "P-value", "FDR P-value", "OR")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  column_spec(2, bold = TRUE)
+```
+
+### Significant Gene-Based Associations (FDR < 0.05)
+
+```{r significant-genes,echo=FALSE,message=FALSE,warning=FALSE}
+# Filter significant gene-based associations
+significant_genes <- gene_based %>%
+    filter(!is.na(LOG10P), PVAL_ADJ < 0.05) %>% 
+    arrange(desc(LOG10P)) %>%
+    select(GENE, MASK, THRESH, CHROM, GENPOS, ALLELE1, A1FREQ, BETA, OR, SE, LOG10P, PVAL, PVAL_ADJ, LOG10P_ADJ)
+
+if(nrow(significant_genes) > 0) {
+    kable(significant_genes[1:min(15, nrow(significant_genes)),], 
+          format = "html", digits = 4,
+          col.names = c("Gene", "Mask", "Threshold", "Chr", "Pos", "Alt Allele", "Alt Freq", 
+                       "Beta", "OR", "SE", "-log10(P)", "P-value", "FDR P-value", "-log10(FDR P)")) %>%
+        kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+        column_spec(c(8, 10, 11), color = "red")
+} else {
+    cat("**No genes reached FDR significance (FDR < 0.05)**")
+}
+```
+
+### Volcano Plot by Mask
+
+```{r volcano-plot,echo=FALSE,message=FALSE,warning=FALSE}
+# Volcano Plot with FDR significance, faceted by mask
+gene_based_plot <- gene_based %>%
+  mutate(Significant = PVAL_ADJ < 0.05)
+
+# Get top FDR significant genes for labeling (top 5 per mask)
+top_hits <- gene_based_plot %>% 
+  filter(Significant) %>%
+  group_by(MASK) %>%
+  slice_max(LOG10P, n = 5) %>%
+  ungroup()
+
+gene_based_plot <- gene_based_plot %>%
+  mutate(Label = ifelse(GENE %in% top_hits$GENE, GENE, NA))
+
+# Calculate FDR cutoff for the line
+fdr_cutoff <- min(gene_based$LOG10P[gene_based$PVAL_ADJ < 0.05], na.rm = TRUE)
+
+volcano_plot <- ggplot(gene_based_plot, aes(x = BETA, y = LOG10P, color = Significant)) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  geom_hline(yintercept = fdr_cutoff, linetype = "dashed", color = "blue", alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dotted", color = "grey40") +
+  geom_text_repel(aes(label = Label), size = 2.5, max.overlaps = 5, 
+                  box.padding = 0.3, point.padding = 0.1) +
+  scale_color_manual(values = c("gray60", "red"), 
+                     labels = c("Not Significant", "FDR < 0.05")) +
+  labs(title = "Volcano Plot: Gene-Based Burden Testing by Mask",
+       subtitle = paste("FDR significant genes:", sum(gene_based_plot$Significant)),
+       x = "Effect Size (Beta)",
+       y = "-log10(p-value)",
+       color = "Significance") +
+  facet_wrap(~MASK, scales = "free_y") +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 10, color = "gray50"),
+        legend.position = "bottom",
+        strip.text = element_text(size = 12, face = "bold"))
+
+print(volcano_plot)
+```
+
+## Effect Direction Summary
+
+```{r effect-direction,echo=FALSE,message=FALSE,warning=FALSE}
+# Direction of Effect Summary
+effect_summary <- gene_based %>%
+  filter(PVAL_ADJ < 0.05) %>%
+  mutate(Direction = ifelse(BETA > 0, "Positive", "Negative")) %>%
+  count(Direction)
+
+if(nrow(effect_summary) > 0) {
+    kable(effect_summary, format = "html", col.names = c("Effect Direction", "Count")) %>%
+      kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"))
+} else {
+    cat("**No FDR significant genes found**")
+}
+```
+
+## Statistical Summary
+
+```{r statistical-summary,echo=FALSE,message=FALSE,warning=FALSE}
+# Summary statistics
+single_summary <- summary(single_variant$LOG10P)
+gene_summary <- summary(gene_based$LOG10P)
+
+summary_df <- data.frame(
+    Metric = c("Single-Variant -log10(P)", "Gene-Based -log10(P)"),
+    Min = c(single_summary[1], gene_summary[1]),
+    Q1 = c(single_summary[2], gene_summary[2]),
+    Median = c(single_summary[3], gene_summary[3]),
+    Mean = c(single_summary[4], gene_summary[4]),
+    Q3 = c(single_summary[5], gene_summary[5]),
+    Max = c(single_summary[6], gene_summary[6])
+)
+
+kable(summary_df, format = "html", digits = 3) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+    column_spec(1, bold = TRUE)
+```
+
+## Output Files
+
+```{r save-results,echo=FALSE,message=FALSE,warning=FALSE}
+# Save significant results
+if(nrow(significant_variants) > 0) {
+    write_csv(significant_variants, "significant_single_variant_hits.csv")
+    cat("**Significant single variants saved to:** `significant_single_variant_hits.csv`\n\n")
+}
+
+if(nrow(significant_genes) > 0) {
+    write_csv(significant_genes, "significant_gene_hits.csv")
+    cat("**Significant gene-based associations saved to:** `significant_gene_hits.csv`\n\n")
+}
+
+cat("**Analysis completed on:**", format(Sys.time(), "%Y-%m-%d %H:%M:%S"))
+```
