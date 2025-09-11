@@ -1,0 +1,32 @@
+# ExWAS Regenie Configuration File
+project:
+  name: "ExWAS"
+
+# Input files
+input:
+  # Option 1: Single all-chromosome file
+  all_chr: "data/work/glnexus/glnexus.norm.all.ref.het.hom.gt.tags.qc.bcf"
+  
+  # Option 2: Individual chromosome files (uncomment and modify as needed)
+  # chromosomes:
+  #   chr1: "data/work/glnexus/chr1.vcf.gz"
+  #   chr2: "data/work/glnexus/chr2.vcf.gz"
+  #   chr3: "data/work/glnexus/chr3.vcf.gz"
+  #   # ... add more chromosomes as needed
+  
+  # VEP CSV files - always a list (even if single file)
+  vep_csv:
+    - "data/work/glnexus/glnexus.norm.all.ref.het.hom.gt.tags.qc.no_sample.vep.report.csv"
+  # Multiple files example:
+  # vep_csv:
+  #   - "data/work/glnexus/chr1.vep.report.csv"
+  #   - "data/work/glnexus/chr2.vep.report.csv"
+  #   - "data/work/glnexus/chr3.vep.report.csv"
+  #   # ... add more chromosome files as needed
+  
+  samples: "samples.txt"
+  sites: "seq_sites.txt"
+  controls: "controls.txt"
+  sex_info: "sex_info.txt"
+  covariates: "covariates.txt"
+

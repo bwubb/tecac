@@ -1,4 +1,6 @@
+import os
 
+os.makedirs("logs/cluster",exist_ok=True)
 
 rule all:
     input:

@@ -45,7 +45,7 @@ rule preprocess_vcf:
 #    'reference'/'r': Treat the missing part as reference.
 
 
-
+#This can be --bcf instead of --vcf if we want to use the bcf file.
 rule convert_to_plink:
     input:
         "preprocess/TECAC_WES.chr{chrom}.vcf.gz"

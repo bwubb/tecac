@@ -1,0 +1,396 @@
+---
+title: "SNP Coverage QC Analysis for Regenie snp list Selection"
+author: "Brad Wubbenhorst"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+
+# Load libraries
+library(tidyverse)
+library(plotly)
+library(DT)
+library(viridis)
+library(patchwork)
+library(ggrepel)
+library(kableExtra)
+```
+
+## Overview
+
+This report analyzes SNP coverage quality control data to identify the best SNP positions for Regenie GRM (Genetic Relationship Matrix) analysis. The goal is to select SNPs with:
+
+- Low missingness in both cases and controls
+- Balanced coverage across sites
+- Minimal depth variance
+- Good representation across all meta groups
+
+## Data Loading and Preprocessing
+
+```{r data-loading}
+# Load the SNP QC data
+# Update the file path as needed
+snp_data <- read_csv("C:/Users/bwubb/Documents/projects/016-TECAC-TGCT-WES/ExWAS/REGENIE_20250819/snplist_qc.stats.csv") %>%
+  # Filter to only autosomes (chr1-22) and drop chrX, chrY
+  filter(chrom %in% paste0("chr", 1:22)) %>%
+  mutate(
+    chrom = factor(chrom, levels = paste0("chr", 1:22)),
+    position = pos,
+    case_missing_pct = case_missingness * 100,
+    control_missing_pct = control_missingness * 100,
+    general_missing_pct = (case_missingness + control_missingness) / 2 * 100
+  )
+
+# Display basic info
+cat("Dataset dimensions:", dim(snp_data), "\n")
+cat("Chromosomes:", unique(snp_data$chrom), "\n")
+cat("Total SNPs:", nrow(snp_data), "\n")
+cat("Available columns:", names(snp_data), "\n")
+```
+
+## Missingness Analysis
+
+### Overall Missingness Summary
+
+```{r missingness-summary}
+# Basic missingness stats
+missing_summary <- snp_data %>%
+  summarise(
+    n_snps = n(),
+    mean_case_missing = mean(case_missing_pct, na.rm = TRUE),
+    mean_control_missing = mean(control_missing_pct, na.rm = TRUE),
+    median_case_missing = median(case_missing_pct, na.rm = TRUE),
+    median_control_missing = median(control_missing_pct, na.rm = TRUE)
+  )
+
+cat("=== MISSINGNESS SUMMARY ===\n")
+cat("Total SNPs:", missing_summary$n_snps, "\n")
+cat("Mean case missingness:", round(missing_summary$mean_case_missing, 3), "%\n")
+cat("Mean control missingness:", round(missing_summary$mean_control_missing, 3), "%\n")
+cat("Median case missingness:", round(missing_summary$median_case_missing, 3), "%\n")
+cat("Median control missingness:", round(missing_summary$median_control_missing, 3), "%\n")
+```
+
+
+## Site-Specific Analysis
+
+### Site Missingness Analysis
+
+```{r site-missingness}
+# Analyze per-site missingness patterns
+cat("=== SITE MISSINGNESS ANALYSIS ===\n")
+site_cols <- names(snp_data)[grep("_missingness$", names(snp_data))]
+site_cols <- site_cols[!site_cols %in% c("case_missingness", "control_missingness")]
+cat("Available site missingness columns:", site_cols, "\n")
+
+# Calculate site missingness statistics for each site
+site_missingness_summary <- data.frame()
+
+for(site_col in site_cols) {
+  site_name <- gsub("_missingness", "", site_col)
+  site_data <- snp_data[[site_col]]
+  
+  site_stats <- data.frame(
+    site = site_name,
+    mean_missing = mean(site_data, na.rm = TRUE),
+    median_missing = median(site_data, na.rm = TRUE),
+    max_missing = max(site_data, na.rm = TRUE),
+    snps_high_missing = sum(site_data > 0.05, na.rm = TRUE)
+  )
+  
+  site_missingness_summary <- rbind(site_missingness_summary, site_stats)
+}
+
+site_missingness_summary <- site_missingness_summary %>%
+  arrange(desc(mean_missing))
+
+# Format as nice HTML table
+site_missingness_summary %>%
+  mutate(
+    mean_missing = round(mean_missing, 4),
+    median_missing = round(median_missing, 4),
+    max_missing = round(max_missing, 4),
+    snps_high_missing_pct = round(snps_high_missing / nrow(snp_data) * 100, 1)
+  ) %>%
+  kable(
+    col.names = c("Site", "Mean Missingness", "Median Missingness", "Max Missingness", "#SNPs >5% Missingness", "%SNPs >5% Missingness"),
+    caption = "Site Missingness Summary Statistics",
+    align = c("l", "r", "r", "r", "r", "r")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+# Calculate missingness differences between sites
+if(length(site_cols) > 1) {
+  site_missingness_diff <- snp_data %>%
+    select(all_of(site_cols)) %>%
+    mutate(
+      max_site_missingness = pmax(!!!syms(site_cols), na.rm = TRUE),
+      min_site_missingness = pmin(!!!syms(site_cols), na.rm = TRUE),
+      site_missingness_range = max_site_missingness - min_site_missingness
+    ) %>%
+    select(max_site_missingness, min_site_missingness, site_missingness_range)
+  
+  cat("\n=== SITE MISSINGNESS DIFFERENCES ===\n")
+  cat("Mean max site missingness:", round(mean(site_missingness_diff$max_site_missingness, na.rm = TRUE), 4), "\n")
+  cat("Mean min site missingness:", round(mean(site_missingness_diff$min_site_missingness, na.rm = TRUE), 4), "\n")
+  cat("Mean site missingness range:", round(mean(site_missingness_diff$site_missingness_range, na.rm = TRUE), 4), "\n")
+  
+  # Distribution of site missingness range
+  p1 <- ggplot(site_missingness_diff, aes(x = site_missingness_range)) +
+    geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+    geom_vline(xintercept = c(0.1, 0.2, 0.3), linetype = "dashed", color = c("orange", "red", "darkred")) +
+    labs(
+      title = "Distribution of Site Missingness Range",
+      subtitle = "Orange=0.1, Red=0.2, Dark Red=0.3",
+      x = "Max Site Missingness - Min Site Missingness",
+      y = "Count"
+    ) +
+    theme_minimal()
+  
+  print(p1)
+  
+  # Direct comparison of sites
+  site_comparison_data <- snp_data %>%
+    select(all_of(site_cols)) %>%
+    pivot_longer(everything(), names_to = "site", values_to = "missingness") %>%
+    mutate(site = gsub("_missingness", "", site))
+  
+  # Histogram of missingness rates by site
+  p2 <- ggplot(site_comparison_data, aes(x = missingness, fill = site)) +
+    geom_histogram(bins = 50, alpha = 0.7, position = "identity") +
+    geom_vline(xintercept = 0.1, linetype = "dashed", color = "orange") +
+    geom_vline(xintercept = 0.2, linetype = "dashed", color = "red") +
+    geom_vline(xintercept = 0.3, linetype = "dashed", color = "darkred") +
+    facet_wrap(~site, scales = "free_y") +
+    labs(
+      title = "Distribution of Missingness Rates by Site",
+      subtitle = "Orange=0.1, Red=0.2, Dark Red=0.3",
+      x = "Missingness Rate",
+      y = "Count"
+    ) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  print(p2)
+  
+  # Mean missingness by site (bar chart)
+  site_means <- site_comparison_data %>%
+    group_by(site) %>%
+    summarise(mean_missing = mean(missingness, na.rm = TRUE)) %>%
+    arrange(desc(mean_missing))
+  
+  p3 <- ggplot(site_means, aes(x = reorder(site, mean_missing), y = mean_missing)) +
+    geom_col(fill = "steelblue", alpha = 0.7) +
+    geom_hline(yintercept = c(0.1, 0.2, 0.3), linetype = "dashed", color = c("orange", "red", "darkred")) +
+    coord_flip() +
+    labs(
+      title = "Mean Missingness Rate by Site",
+      subtitle = "Orange=0.1, Red=0.2, Dark Red=0.3",
+      x = "Site",
+      y = "Mean Missingness Rate"
+    ) +
+    theme_minimal()
+  
+  print(p3)
+}
+```
+
+### Site Missingness Analysis
+
+```{r site-missingness-analysis}
+# Compare missingness patterns across different sites
+if(length(site_cols) > 1) {
+  # Create a long format for site comparison
+  site_long <- snp_data %>%
+    select(chrom, pos, all_of(site_cols)) %>%
+    pivot_longer(cols = all_of(site_cols), names_to = "site", values_to = "missingness") %>%
+    mutate(site = gsub("_missingness", "", site))
+  
+  # Summary by site
+  site_summary <- site_long %>%
+    group_by(site) %>%
+    summarise(
+      n_snps = n(),
+      mean_missingness = mean(missingness, na.rm = TRUE),
+      median_missingness = median(missingness, na.rm = TRUE),
+      max_missingness = max(missingness, na.rm = TRUE),
+      snps_high_missing = sum(missingness > 0.05, na.rm = TRUE),
+      snps_high_missing_pct = round(snps_high_missing / n_snps * 100, 1)
+    ) %>%
+    arrange(desc(mean_missingness))
+  
+  # Format as HTML table
+  site_summary %>%
+    mutate(
+      mean_missingness = round(mean_missingness, 4),
+      median_missingness = round(median_missingness, 4),
+      max_missingness = round(max_missingness, 4)
+    ) %>%
+    kable(
+      col.names = c("Site", "Total SNPs", "Mean Missingness", "Median Missingness", "Max Missingness", "#SNPs >5% Missingness", "%SNPs >5% Missingness"),
+      caption = "Detailed Site Missingness Comparison",
+      align = c("l", "r", "r", "r", "r", "r", "r")
+    ) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+  
+  # Create heatmaps for each chromosome 1-22
+  chromosomes <- paste0("chr", 1:22)
+  
+  for(chr in chromosomes) {
+    chr_data <- site_long %>%
+      filter(chrom == chr) %>%
+      arrange(pos)
+    
+    if(nrow(chr_data) > 0) {
+      # Cap missingness at 0.1 and create position labels
+      chr_data$missingness_capped <- pmin(chr_data$missingness, 0.1)
+      chr_data$pos_factor <- factor(chr_data$pos, levels = sort(unique(chr_data$pos), decreasing = TRUE))  # Reverse order
+      
+      # Create position labels for y-axis
+      positions <- sort(unique(chr_data$pos), decreasing = TRUE)  # Reverse order
+      n_breaks <- min(10, length(positions))
+      break_positions <- positions[seq(1, length(positions), by = max(1, length(positions) %/% n_breaks))]
+      break_labels <- paste0(chr, ":", format(break_positions, big.mark = ","))
+      
+      # Calculate dynamic height based on number of positions
+      n_positions <- length(unique(chr_data$pos))
+      
+      # Set chunk options for this specific plot
+      knitr::opts_chunk$set(fig.height = max(8, min(40, n_positions * 0.03)))
+      
+      p_heatmap <- ggplot(chr_data, aes(x = site, y = pos_factor, fill = missingness_capped)) +
+        geom_tile() +
+        scale_fill_gradient2(
+          low = "white", 
+          mid = "yellow", 
+          high = "red",
+          midpoint = 0.05,  # Yellow at 5%
+          limits = c(0, 0.10),  # Cap at 10%
+          name = "Missingness\nRate",
+          breaks = c(0, 0.02, 0.04, 0.06, 0.08, 0.10),
+          labels = c("0.00", "0.02", "0.04", "0.06", "0.08", "0.10+"),
+          guide = guide_colorbar(
+            barwidth = 15, 
+            barheight = 1
+          )
+        ) +
+        scale_y_discrete(breaks = as.character(break_positions), labels = break_labels) +
+        labs(
+          title = paste("Missingness Rate Heatmap -", chr),
+          subtitle = paste("White=0%, Yellow=5%, Red=10% (capped) |", n_positions, "positions"),
+          x = "Site",
+          y = "Genomic Position"
+        ) +
+        theme_minimal() +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+          axis.text.y = element_text(size = 8),
+          legend.position = "bottom",
+          plot.title = element_text(size = 14, face = "bold"),
+          panel.grid = element_blank()
+        )
+        
+        print(p_heatmap)
+      
+      # CHROMOSOME IDEOGRAM INSTRUCTIONS (commented out for future implementation):
+      # To add chromosome ideograms with cytobands, you would need:
+      # 
+      # 1. INSTALL PACKAGES:
+      #    install.packages(c("karyoploteR", "ggbio", "GenomicRanges"))
+      #    if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+      #    BiocManager::install("karyoploteR")
+      #
+      # 2. DOWNLOAD CYTOBAND DATA:
+      #    # Download from UCSC or use built-in data
+      #    cytobands <- read.table("cytoBand.txt", header=FALSE, sep="\t")
+      #    colnames(cytobands) <- c("chr", "start", "end", "band", "stain")
+      #    # Or use: data(cytobands, package="karyoploteR")
+      #
+      # 3. CREATE IDEOGRAM PLOT:
+      #    library(karyoploteR)
+      #    kp <- plotKaryotype(genome="hg38", chromosomes=chr)
+      #    kpAddCytobands(kp, cytobands=cytobands)
+      #    kpAddBaseNumbers(kp, tick.dist=10000000, minor.tick.dist=1000000)
+      #
+      # 4. COMBINE WITH HEATMAP:
+      #    # Use patchwork or cowplot to combine ideogram + heatmap
+      #    library(patchwork)
+      #    combined_plot <- ideogram_plot + p_heatmap + plot_layout(ncol=1, heights=c(1, 4))
+      #
+      # 5. ADDITIONAL DATA NEEDED:
+      #    - Centromere positions (for centromere lines)
+      #    - Gene positions (if you want to show genes)
+      #    - Chromosome lengths (for proper scaling)
+      #    - Band color schemes (gpos25, gpos50, gneg, etc.)
+      
+      # Add some spacing between chromosomes
+      cat("\n---\n")
+      
+    } else {
+      cat("No data found for", chr, "\n")
+    }
+  }
+  
+} else {
+  cat("Only one site found - no comparison possible\n")
+}
+```
+
+
+
+
+### Case vs Control Missingness Comparison
+
+```{r case-control-stats}
+# Statistical test for case vs control missingness
+case_control_test <- snp_data %>%
+  filter(!is.na(case_missing_pct) & !is.na(control_missing_pct)) %>%
+  summarise(
+    n_snps = n(),
+    mean_diff = mean(case_missing_pct - control_missing_pct),
+    median_diff = median(case_missing_pct - control_missing_pct),
+    # Paired t-test
+    t_stat = t.test(case_missing_pct, control_missing_pct, paired = TRUE)$statistic,
+    p_value = t.test(case_missing_pct, control_missing_pct, paired = TRUE)$p.value
+  )
+
+cat("=== CASE VS CONTROL STATISTICAL TEST ===\n")
+cat("Mean difference (case - control):", round(case_control_test$mean_diff, 4), "%\n")
+cat("Median difference (case - control):", round(case_control_test$median_diff, 4), "%\n")
+cat("Paired t-test p-value:", format(case_control_test$p_value, scientific = TRUE), "\n")
+cat("Significant difference:", ifelse(case_control_test$p_value < 0.05, "YES", "NO"), "\n")
+
+# Plot case vs control with statistical info
+ggplot(snp_data, aes(x = case_missing_pct, y = control_missing_pct)) +
+  geom_point(alpha = 0.6, color = "steelblue", size = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  annotate("text", 
+           x = max(snp_data$case_missing_pct, na.rm = TRUE) * 0.8, 
+           y = max(snp_data$control_missing_pct, na.rm = TRUE) * 0.2,
+           label = paste("p =", format(case_control_test$p_value, scientific = TRUE))) +
+  labs(
+    title = "Case vs Control Missingness",
+    subtitle = paste("Mean diff =", round(case_control_test$mean_diff, 3), "%"),
+    x = "Case Missingness (%)",
+    y = "Control Missingness (%)"
+  ) +
+  theme_minimal()
+```
+
+
+
+

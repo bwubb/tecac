@@ -1,0 +1,71 @@
+__default__:
+    'M': '8192'
+    'n': '1'
+    'J': '{rule}_{wildcards.CHR}'
+    'eo': 'logs/cluster/regenie2/{rule}.{wildcards.CHR}.e'
+    'oo': 'logs/cluster/regenie2/{rule}.{wildcards.CHR}.o'
+    'R': '"span [hosts=1] rusage [mem=8192]"'
+
+preprocess_vcf:
+    'M': '4096'
+    'n': '1'
+    'J': 'preprocess_vcf_{wildcards.CHR}'
+    'eo': 'logs/cluster/regenie2/preprocess_vcf.{wildcards.CHR}.e'
+    'oo': 'logs/cluster/regenie2/preprocess_vcf.{wildcards.CHR}.o'
+    'R': '"span [hosts=1] rusage [mem=4096]"'
+
+chr_variant_list:
+    'M': '8192'
+    'n': '2'
+    'J': 'chr_variant_list_{wildcards.CHR}'
+    'eo': 'logs/cluster/regenie2/chr_variant_list.{wildcards.CHR}.e'
+    'oo': 'logs/cluster/regenie2/chr_variant_list.{wildcards.CHR}.o'
+    'R': '"span [hosts=1] rusage [mem=8192]"'
+
+merge_chr_pgen:
+    'M': '16384'
+    'n': '4'
+    'J': 'merge_chr_pgen'
+    'eo': 'logs/cluster/regenie2/merge_chr_pgen.merge.e'
+    'oo': 'logs/cluster/regenie2/merge_chr_pgen.merge.o'
+    'R': '"span [hosts=1] rusage [mem=16384]"'
+
+preprocess_regenie:
+    'M': '8192'
+    'n': '2'
+    'J': 'preprocess_regenie'
+    'eo': 'logs/cluster/regenie2/preprocess_regenie.preprocess.e'
+    'oo': 'logs/cluster/regenie2/preprocess_regenie.preprocess.o'
+    'R': '"span [hosts=1] rusage [mem=8192]"'
+
+run_step1_regenie:
+    'M': '32768'
+    'n': '8'
+    'J': 'step1_regenie'
+    'eo': 'logs/cluster/regenie2/run_step1_regenie.step1.e'
+    'oo': 'logs/cluster/regenie2/run_step1_regenie.step1.o'
+    'R': '"span [hosts=1] rusage [mem=32768]"'
+
+run_step2_single_variant:
+    'M': '16384'
+    'n': '4'
+    'J': 'step2_single'
+    'eo': 'logs/cluster/regenie2/run_step2_single_variant.step2.e'
+    'oo': 'logs/cluster/regenie2/run_step2_single_variant.step2.o'
+    'R': '"span [hosts=1] rusage [mem=16384]"'
+
+run_step2_gene_based:
+    'M': '16384'
+    'n': '4'
+    'J': 'step2_gene'
+    'eo': 'logs/cluster/regenie2/run_step2_gene_based.step2.e'
+    'oo': 'logs/cluster/regenie2/run_step2_gene_based.step2.o'
+    'R': '"span [hosts=1] rusage [mem=16384]"'
+
+report_regenie:
+    'M': '4096'
+    'n': '1'
+    'J': 'report_regenie'
+    'eo': 'logs/cluster/regenie2/report_regenie.report.e'
+    'oo': 'logs/cluster/regenie2/report_regenie.report.o'
+    'R': '"span [hosts=1] rusage [mem=4096]"'
