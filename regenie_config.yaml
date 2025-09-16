@@ -29,4 +29,5 @@ input:
   controls: "controls.txt"
   sex_info: "sex_info.txt"
   covariates: "covariates.txt"
+  eigenvec: ""
 

@@ -19,33 +19,46 @@ def parse_site_metadata(metadata_file):
                 status_data[sample]=int(status)
     return site_data,status_data
 
-def parse_coverage_data(csv_file):
-    """Parse the bcftools output CSV"""
+def get_variant_count(csv_file):
+    """Count total number of variants without loading into memory"""
+    count=0
+    with open(csv_file,'r') as f:
+        for line in f:
+            parts=line.strip().split(',')
+            if len(parts)>=6:
+                count+=1
+    return count
+
+def parse_variant_chunk(csv_file,chunk_start,chunk_size):
+    """Parse a chunk of variants from the CSV file"""
     variant_data=[]
+    current_pos=0
     
-    print("Parsing variant data...")
     with open(csv_file,'r') as f:
         for line in f:
             parts=line.strip().split(',')
             if len(parts)<6:
                 continue
                 
-            chrom,pos,ref,alt,maf,ns=parts[:6]
-            pos=int(pos)
+            if current_pos>=chunk_start and current_pos<chunk_start+chunk_size:
+                chrom,pos,ref,alt,maf,ns=parts[:6]
+                pos=int(pos)
+                
+                variant_data.append({
+                    'chrom':chrom,
+                    'pos':pos,
+                    'ref':ref,
+                    'alt':alt,
+                    'maf':float(maf) if maf!='.' else 0.0,
+                    'ns':int(ns) if ns!='.' else 0
+                })
             
-            variant_data.append({
-                'chrom':chrom,
-                'pos':pos,
-                'ref':ref,
-                'alt':alt,
-                'maf':float(maf) if maf!='.' else 0.0,
-                'ns':int(ns) if ns!='.' else 0
-            })
+            current_pos+=1
+            
+            if current_pos>=chunk_start+chunk_size:
+                break
     
-    variant_df=pd.DataFrame(variant_data)
-    print(f"Variant data shape: {variant_df.shape}")
-    
-    return variant_df
+    return pd.DataFrame(variant_data)
 
 def parse_sample_data_for_chunk(csv_file,chunk_variants):
     """Parse sample data for a specific chunk of variants"""
@@ -197,16 +210,20 @@ def main():
         site_expected_counts[site] = site_sample_count
         print(f"  Site {site}: {site_sample_count} samples")
     
-    # Parse variant data only
-    variant_df=parse_coverage_data(args.csv_file)
+    # Get total variant count without loading into memory
+    print("Counting variants...")
+    total_snps=get_variant_count(args.csv_file)
+    print(f"Total variants to process: {total_snps}")
     
     # Process SNPs in chunks
     all_imbalance_stats=[]
-    total_snps=len(variant_df)
     
     for chunk_start in range(0,total_snps,args.chunk_size):
         chunk_end=min(chunk_start+args.chunk_size,total_snps)
-        chunk_variants=variant_df.iloc[chunk_start:chunk_end]
+        print(f"Processing chunk {chunk_start//args.chunk_size + 1}/{(total_snps-1)//args.chunk_size + 1} (variants {chunk_start+1}-{chunk_end})")
+        
+        # Parse variant chunk
+        chunk_variants=parse_variant_chunk(args.csv_file,chunk_start,chunk_end-chunk_start)
         
         # Parse sample data for this chunk only
         chunk_sample_df=parse_sample_data_for_chunk(args.csv_file,chunk_variants)
@@ -216,6 +233,7 @@ def main():
         all_imbalance_stats.extend(chunk_stats)
         
         # Clear memory
+        del chunk_variants
         del chunk_sample_df
         del chunk_stats
     

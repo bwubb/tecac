@@ -593,6 +593,7 @@ def main(argv=None):
             single=True
             tumor_normal=False
             cohort=False
+            normal=None
         except ValueError:
             raise ValueError("Single mode requires format: single,{sample.id}")
     elif args.mode=='no_sample':
@@ -607,6 +608,7 @@ def main(argv=None):
         single=False
         tumor_normal=False
         tumor=None
+        normal=None
         sample=None
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")

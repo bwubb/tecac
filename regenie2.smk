@@ -4,7 +4,7 @@ import os
 os.makedirs("logs/cluster/regenie2",exist_ok=True)
 
 # Extract configuration values
-PROJECT_NAME=config['project']['name']
+PROJECT=config['project']['name']
 CHROMOSOMES=list(range(1,23)) # Chromosomes 1-22
 
 # Determine VCF input method
@@ -22,25 +22,14 @@ else:
 date=datetime.now().strftime("%Y%m%d")
 
 localrules:merge_chr_snplist,create_vep_list
+wildcard_constraints:
+    CHR='[1-22]'
 
 rule run_regenie:
     input:
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.bcf",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT_NAME),
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.filtered.pgen",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT_NAME),
-        f"data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.pgen",
-        f"{PROJECT_NAME}.regenie.annotation.txt",
-        f"{PROJECT_NAME}.regenie.set.txt",
-        f"{PROJECT_NAME}.regenie.mask.txt",
-        f"{PROJECT_NAME}.regenie.covar.txt",
-        f"{PROJECT_NAME}.regenie.pheno.txt",
-        f"{PROJECT_NAME}.step1_1.loco.gz",
-        f"{PROJECT_NAME}.step2_single_variant_STATUS.regenie",
-        f"{PROJECT_NAME}.step2_gene_based_STATUS.regenie"
-
-rule run_report:
-    input:
-        expand("TECAC_{date}_regenie_report.html",date=datetime.now().strftime("%Y%m%d"))
-
+        expand("data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_single_variant_STATUS.regenie",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES),
+        expand("data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_gene_based_STATUS.regenie",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES)
+        
 
 rule preprocess_vcf:
     input:
@@ -50,7 +39,7 @@ rule preprocess_vcf:
     params:
         samples=config['input']['samples']
     shell:
-        "bcftools view -f 'PASS' -S {params.samples} {input} | bcftools annotate --set-id '%CHROM\_%POS\_%REF\_%ALT' -Ob -o {output}"
+        "bcftools view -f 'PASS' -r chr{wildcards.CHR} -S {params.samples} {input} | bcftools annotate --set-id '%CHROM\_%POS\_%REF\_%ALT' -Ob -o {output}"
 
 #--vcf-half-call <mode>
 
@@ -63,41 +52,60 @@ rule preprocess_vcf:
 #    'missing'/'m': Treat half-calls as missing.
 #    'reference'/'r': Treat the missing part as reference.
 
-rule chr_variant_list:
+rule chr_pgen:
     input:
         "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.bcf"
     output:
-        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.filtered.pgen",
-        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.filtered.snplist"
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.pgen"
     params:
-        output="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.filtered"
+        sex_info=config['input']['sex_info'],
+        output_prefix="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}"
     shell:
-        "plink2 --bcf {input} --vcf-half-call r --maf 0.05 --snps-only --geno 0.1 --hwe 1e-15 --indep-pairwise 500 50 0.4 --write-snplist --make-pgen --out {params.output}"
+        "plink2 --update-sex {params.sex_info} --bcf {input} --double-id --vcf-half-call r --make-pgen --out {params.output_prefix}"
+
+rule chr_variant_list:
+    input:
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.pgen"
+    output:
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pgen",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pvar",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.psam",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.snplist"
+    params:
+        pfile="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}",
+        out="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1",
+    shell:
+        "plink2 --pfile {params.pfile} --double-id  --maf 0.05 --snps-only --geno 0.1 --hwe 1e-6 --indep-pairwise 500 50 0.4 --write-snplist --make-pgen --out {params.out}"
 
 rule merge_chr_pgen:
     input:
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.filtered.pgen",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT_NAME)
+        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pgen",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT),
+        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pvar",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT),
+        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.psam",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT)
     output:
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.pgen",
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.eigenvec"
+        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.pgen",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.pvar",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.psam"
+        #"data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.eigenvec"
     params:
-        output="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered"
+        out="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1"
     shell:
         """
         rm -f file_list.txt
-        for chrom in {{2..22}}; do echo \"data/work/regenie/preprocess/{PROJECT_NAME}.chr${{chrom}}.filtered.pgen data/work/regenie/preprocess/{PROJECT_NAME}.chr${{chrom}}.filtered.pvar data/work/regenie/preprocess/{PROJECT_NAME}.chr${{chrom}}.filtered.psam\" >> file_list.txt; done
-        plink2 --pfile data/work/regenie/preprocess/{PROJECT_NAME}.chr1.filtered --pmerge-list file_list.txt --make-pgen --pca --out {params.output}
+        for chrom in {{2..22}}; do echo \"data/work/regenie/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.step1.pgen data/work/regenie/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.step1.pvar data/work/regenie/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.step1.psam\" >> file_list.txt; done
+        plink2 --pfile data/work/regenie/preprocess/{wildcards.PROJECT_NAME}.chr1.step1 --double-id --pmerge-list file_list.txt --make-pgen --out {params.out}
         """
+        #--pca
 
 rule merge_chr_snplist:
     input:
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.filtered.snplist",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT_NAME)
+        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.snplist",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT)
     output:
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.snplist"
+        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.snplist"
     run:
         with open(output[0],'w') as f:
             for i in range(1,23):
-                with open(f"data/work/regenie/preprocess/{wildcards.PROJECT_NAME}.chr{i}.filtered.snplist",'r') as f2:
+                with open(f"data/work/regenie/preprocess/{PROJECT}.chr{i}.step1.snplist",'r') as f2:
                     f.write(f2.read())
 
 rule create_vep_list:
@@ -111,7 +119,7 @@ rule create_vep_list:
 rule preprocess_regenie:
     input:
         vep_list="vep_files.list",
-        eigenvec="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.eigenvec",
+        #eigenvec=config['eigenvec'],
         sites=config['input']['sites'],
         controls=config['input']['controls']
     output:
@@ -121,17 +129,18 @@ rule preprocess_regenie:
         covar="{PROJECT_NAME}.regenie.covar.txt",
         pheno="{PROJECT_NAME}.regenie.pheno.txt"
     params:
-        output_prefix=PROJECT_NAME
+        output_prefix=PROJECT,
+        eigenvec="subset_withFID.eigenvec" #Hard code for now
     shell:
         """
         COVAR_ARG=""
-        if [ -n "{config[input][covariates]}" ]; then
+        if [ -n "{config[input][covariates]}" ] && [ -f "{config[input][covariates]}" ]; then
             COVAR_ARG="--covariates {config[input][covariates]}"
         fi
 
         python preprocess_regenie.py \
         --vep-list-file {input.vep_list} \
-        --eigenvec {input.eigenvec} \
+        --eigenvec {params.eigenvec} \
         --sites {input.sites} \
         --controls {input.controls} \
         $COVAR_ARG \
@@ -140,15 +149,15 @@ rule preprocess_regenie:
 
 rule run_step1_regenie:
     input:
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.pgen",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.pgen",
         "{PROJECT_NAME}.regenie.covar.txt",
         "{PROJECT_NAME}.regenie.pheno.txt",
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.snplist"
+        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.snplist"
     output:
         "{PROJECT_NAME}.step1_1.loco.gz",
         "{PROJECT_NAME}.step1_pred.list"
     params:
-        input_basename="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr",
+        input_basename="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1",
         output_basename="{PROJECT_NAME}.step1",
         lowmem_prefix="data/work/regenie/tmp_rg_"
     shell:
@@ -158,15 +167,15 @@ rule run_step1_regenie:
 
 rule run_step2_single_variant:
     input:
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.pgen",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.pgen",
         "{PROJECT_NAME}.regenie.covar.txt",
         "{PROJECT_NAME}.regenie.pheno.txt",
         "{PROJECT_NAME}.step1_pred.list"
     output:
-        "{PROJECT_NAME}.step2_single_variant_STATUS.regenie"
+        "data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_single_variant_STATUS.regenie"
     params:
-        input_basename="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr",
-        output_basename="{PROJECT_NAME}.step2_single_variant"
+        input_basename="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}",
+        output_basename="data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_single_variant"
     shell:
         "regenie --step 2 --pgen {params.input_basename} --phenoFile {input[2]} --covarFile {input[1]} --bt "
         "--firth --approx --pThresh 0.999 --firth-se --pred {input[3]} --bsize 400 --af-cc "
@@ -175,7 +184,7 @@ rule run_step2_single_variant:
 
 rule run_step2_gene_based:
     input:
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.filtered.pgen",
+        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.pgen",
         "{PROJECT_NAME}.regenie.covar.txt",
         "{PROJECT_NAME}.regenie.pheno.txt",
         "{PROJECT_NAME}.regenie.annotation.txt",
@@ -183,25 +192,13 @@ rule run_step2_gene_based:
         "{PROJECT_NAME}.regenie.mask.txt",
         "{PROJECT_NAME}.step1_pred.list"
     output:
-        "{PROJECT_NAME}.step2_gene_based_STATUS.regenie"
+        "data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_gene_based_STATUS.regenie"
     params:
-        input_basename="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr",
-        output_basename="{PROJECT_NAME}.step2_gene_based"
+        input_basename="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}",
+        output_basename="data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_gene_based"
     shell:
         "regenie --step 2 --pgen {params.input_basename} --phenoFile {input[2]} --covarFile {input[1]} --bt "
         "--firth --approx --pThresh 0.999 --firth-se --pred {input[6]} --anno-file {input[3]} "
         "--set-list {input[4]} --mask-def {input[5]} --build-mask 'max' --write-mask-snplist "
         "--check-burden-files --af-cc --bsize 200 --vc-tests skat,skato --out {params.output_basename}"
         #--aaf-bins 0.01,0.001,0.0001 --strict-check-burden --test additive --minMAC 10
-
-rule report_regenie:
-    input:
-        "{PROJECT_NAME}.regenie.pheno.txt",
-        "{PROJECT_NAME}.step2_single_variant_STATUS.regenie",
-        "{PROJECT_NAME}.step2_gene_based_STATUS.regenie"
-    output:
-        "{PROJECT_NAME}_{date}_regenie_report.html"
-    shell:
-        """
-        Rscript -e "rmarkdown::render('report_regenie.Rmd',output_file='{output}')"
-        """
