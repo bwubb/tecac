@@ -23,13 +23,23 @@ date=datetime.now().strftime("%Y%m%d")
 
 localrules:merge_chr_snplist,create_vep_list
 wildcard_constraints:
-    CHR='[1-22]'
+    CHR='\d+'
+
+def get_covariates(config):
+    cmd=""
+    if config['input'].get('covariates',False):
+        cmd=f"--covariates {config['input']['covariates']} "
+    if config['input'].get('sites',False):
+        cmd+=f"--sites {config['input']['sites']} "
+    if config['input'].get('eigenvec',False):
+        cmd+=f"--eigenvec {config['input']['eigenvec']} "
+    return cmd
 
 rule run_regenie:
     input:
         expand("data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_single_variant_STATUS.regenie",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES),
         expand("data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_gene_based_STATUS.regenie",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES)
-        
+
 
 rule preprocess_vcf:
     input:
@@ -68,8 +78,6 @@ rule chr_variant_list:
         "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.pgen"
     output:
         "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pgen",
-        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pvar",
-        "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.psam",
         "data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.snplist"
     params:
         pfile="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}",
@@ -79,13 +87,9 @@ rule chr_variant_list:
 
 rule merge_chr_pgen:
     input:
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pgen",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT),
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.pvar",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT),
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.psam",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT)
+        expand("data/work/regenie/preprocess/{{PROJECT_NAME}}.chr{CHR}.step1.pgen",CHR=CHROMOSOMES)
     output:
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.pgen",
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.pvar",
-        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.psam"
+        "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.pgen"
         #"data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.eigenvec"
     params:
         out="data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1"
@@ -99,7 +103,7 @@ rule merge_chr_pgen:
 
 rule merge_chr_snplist:
     input:
-        expand("data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}.step1.snplist",CHR=CHROMOSOMES,PROJECT_NAME=PROJECT)
+        expand("data/work/regenie/preprocess/{{PROJECT_NAME}}.chr{CHR}.step1.snplist",CHR=CHROMOSOMES)
     output:
         "data/work/regenie/preprocess/{PROJECT_NAME}.all_chr.step1.snplist"
     run:
@@ -120,31 +124,25 @@ rule preprocess_regenie:
     input:
         vep_list="vep_files.list",
         #eigenvec=config['eigenvec'],
-        sites=config['input']['sites'],
+        samples=config['input']['samples'],
         controls=config['input']['controls']
     output:
-        annotation="{PROJECT_NAME}.regenie.annotation.txt",
+        annotation="{PROJECT_NAME}.regenie.annotation.txt", #Im getting duplicates annotations. Need to fix this.
         set_file="{PROJECT_NAME}.regenie.set.txt",
         mask="{PROJECT_NAME}.regenie.mask.txt",
         covar="{PROJECT_NAME}.regenie.covar.txt",
         pheno="{PROJECT_NAME}.regenie.pheno.txt"
     params:
+        optional_cmd=get_covariates(config), #Handles sites, covariates, eigenvec
         output_prefix=PROJECT,
-        eigenvec="subset_withFID.eigenvec" #Hard code for now
     shell:
         """
-        COVAR_ARG=""
-        if [ -n "{config[input][covariates]}" ] && [ -f "{config[input][covariates]}" ]; then
-            COVAR_ARG="--covariates {config[input][covariates]}"
-        fi
-
         python preprocess_regenie.py \
         --vep-list-file {input.vep_list} \
-        --eigenvec {params.eigenvec} \
-        --sites {input.sites} \
+        --samples {input.samples} \
         --controls {input.controls} \
-        $COVAR_ARG \
-        -O {params.output_prefix}
+        -O {params.output_prefix} \
+        {params.optional_cmd}
         """
 
 rule run_step1_regenie:
@@ -177,7 +175,7 @@ rule run_step2_single_variant:
         input_basename="data/work/regenie/preprocess/{PROJECT_NAME}.chr{CHR}",
         output_basename="data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_single_variant"
     shell:
-        "regenie --step 2 --pgen {params.input_basename} --phenoFile {input[2]} --covarFile {input[1]} --bt "
+        "regenie --step 2 --pgen {params.input_basename} --covarFile {input[1]} --phenoFile {input[2]} --bt "
         "--firth --approx --pThresh 0.999 --firth-se --pred {input[3]} --bsize 400 --af-cc "
         "--out {params.output_basename}"
         #--strict --minMAC 10 --test additive

@@ -23,7 +23,7 @@ class SampleAnnot:
 
     @staticmethod
     def ZYG_check(GT,AD):
-        if GT in ['.','./.']:
+        if GT in ['.','./.','.|.']:
             #No GT info, try to make call from AD
             if not AD or sum(AD)==0:
                 return '.'
@@ -58,13 +58,12 @@ class SampleAnnot:
             x=defaultdict(str)
             x['Sample.ID']=c['sample']
             x['Sample.Depth']=f"{c.get('DP',0)}"
-
             try:
                 ad=SampleAnnot.AD_check(c.get('AD',[0,0]))
                 x['Sample.AltDepth']=f"{ad[1]}"
                 dp=c.get('DP',0)
                 x['Sample.AltFrac']=f"{ad[1]/dp:.3f}" if dp else '.'
-                x['Sample.Zyg']=f"{SampleAnnot.ZYG_check(c.get('gt_bases','./.'),ad)}"
+                x['Sample.Zyg']=f"{SampleAnnot.ZYG_check(c.get('genotype','./.'),ad)}"
 
                 return x if x['Sample.Zyg'] not in ['.','HOM_REF'] else None
 
@@ -363,7 +362,7 @@ class VEPannotation(BasicInfoAnnot,GnomadAnnot,ClinvarAnnot,SpliceAIAnnot,
         calls (list): Sample genotype information
         call_count (int): Number of calls processed
     """
-    def __init__(self,record,vcf_reader,tumor_normal=False,tumor_id=None,no_sample=False):
+    def __init__(self,record,vcf_reader,tumor_normal=False,tumor_id=None,no_sample=False,single_sample=None):
         self.fields=defaultdict(str)
         self.fields['Chr']=f"{record.CHROM}"
         self.fields['Start']=f"{record.POS}"
@@ -384,36 +383,47 @@ class VEPannotation(BasicInfoAnnot,GnomadAnnot,ClinvarAnnot,SpliceAIAnnot,
             #Extract sample data
             sample_data=[]
             for i,sample_name in enumerate(vcf_reader.samples):
+                # In single mode, only process the specified sample
+                if single_sample and sample_name!=single_sample:
+                    continue
+                
                 try:
-                    # Use cyvcf2's more robust genotype access
-                    sample = record.samples[i]
-                    gt_bases = sample.gt_bases if sample.gt_bases else './.'
-                    dp = sample['DP'] if 'DP' in sample else 0
-                    
-                    # Handle AD field more robustly
-                    if 'AD' in sample and sample['AD'] is not None:
-                        ad = sample['AD']
-                        if isinstance(ad, (list, tuple)) and len(ad) >= 2:
-                            ref_depth, alt_depth = ad[0], ad[1]
+                    gt_list=record.genotypes[i]
+                    if gt_list and len(gt_list)>0:
+                        # Filter out the phasing boolean (last element) and get only valid allele indices
+                        allele_indices=[gt for gt in gt_list[:-1] if isinstance(gt,int) and gt>=0]
+                        if allele_indices:
+                            # Use phasing info: True = |, False = /
+                            phasing='|' if len(gt_list)>2 and gt_list[-1] else '/'
+                            genotype=phasing.join([str(allele_idx) for allele_idx in allele_indices])
                         else:
-                            ref_depth, alt_depth = 0, 0
+                            genotype='./.'
                     else:
-                        ref_depth, alt_depth = 0, 0
-                    
-                    sample_data.append({
-                        'sample': sample_name,
-                        'gt_bases': gt_bases,
-                        'DP': dp,
-                        'AD': [ref_depth,alt_depth]
-                    })
-                except (IndexError,TypeError,AttributeError):
-                    #Handle missing sample data
-                    sample_data.append({
-                        'sample': sample_name,
-                        'gt_bases': './.',
-                        'DP': 0,
-                        'AD': [0,0]
-                    })
+                        genotype='./.'
+                except Exception as e:
+                    print(f"Error parsing genotype for sample {sample_name} at {record.CHROM}:{record.POS}: {e}")
+                    print(f"  Raw record: {record}")
+                    genotype='./.'
+                
+                dp=record.gt_depths[i] if record.gt_depths is not None else 0
+                
+                # Handle AD field
+                alt_depth=0
+                if record.gt_alt_depths is not None and hasattr(record.gt_alt_depths,'__len__') and len(record.gt_alt_depths) > i:
+                    alt_depth=int(record.gt_alt_depths[i])
+                
+                ref_depth=0
+                if record.gt_ref_depths is not None and hasattr(record.gt_ref_depths,'__len__') and len(record.gt_ref_depths) > i:
+                    ref_depth=int(record.gt_ref_depths[i])
+                else:
+                    ref_depth=max(0,dp-alt_depth)
+                
+                sample_data.append({
+                    'sample':sample_name,
+                    'genotype':genotype,
+                    'DP':dp,
+                    'AD':[ref_depth,alt_depth]
+                })
             
             if tumor_normal:
                 self.calls=self.__tumor_normal__(sample_data,tumor_id)
@@ -594,6 +604,7 @@ def main(argv=None):
             tumor_normal=False
             cohort=False
             normal=None
+            print(sample)
         except ValueError:
             raise ValueError("Single mode requires format: single,{sample.id}")
     elif args.mode=='no_sample':
@@ -612,6 +623,21 @@ def main(argv=None):
         sample=None
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
+
+    # Print all arguments
+    print("="*60)
+    print("VEP VCF Parser - Configuration")
+    print("="*60)
+    print(f"Input VCF: {args.input_vcf}")
+    print(f"Output CSV: {args.output_csv}")
+    print(f"Mode: {args.mode}")
+    print(f"Gene list: {args.gene_list if args.gene_list else 'None'}")
+    print(f"Gene blacklist: {args.gene_blacklist if args.gene_blacklist else 'None'}")
+    print(f"BED region: {args.bed_region if args.bed_region else 'None'}")
+    print(f"Include VLR: {args.include_vlr}")
+    print(f"Include ref calls: {args.include_ref}")
+    print(f"No caller info: {args.no_caller}")
+    print("="*60)
 
     header=report_header(tumor_normal,args.no_caller)
 
@@ -668,9 +694,12 @@ def main(argv=None):
             variant_count+=1
             if variant_count % 10000 == 0:
                 print(f"Processed {variant_count} variants...")
+            if variant_count % 1000 == 0:
+                print(f"  Processing variant {variant_count} at {record.CHROM}:{record.POS}")
             if len(record.ALT)>1:
                 print(f"Warning! : record.ALT length is {len(record.ALT)}. Not currently supported")
-            vep_data=VEPannotation(record,VcfReader,tumor_normal,tumor,args.mode=='no_sample')
+            single_sample_name=sample if single else None
+            vep_data=VEPannotation(record,VcfReader,tumor_normal,tumor,args.mode=='no_sample',single_sample_name)
 
             if record.INFO.get('ANN') is None:
                 skipped_no_ann+=1
@@ -712,6 +741,8 @@ def main(argv=None):
                             if filter_result==True:
                                 vep_data.report(writer)
                                 processed_count+=1
+                                if processed_count % 100 == 0:
+                                    print(f"    Written {processed_count} variants to output")
                             elif filter_result=="blacklist":
                                 skipped_blacklist+=1
                             else:
@@ -728,6 +759,8 @@ def main(argv=None):
                             if filter_result==True:
                                 vep_data.report(writer)
                                 processed_count+=1
+                                if processed_count % 100 == 0:
+                                    print(f"    Written {processed_count} variants to output")
                             elif filter_result=="blacklist":
                                 skipped_blacklist+=1
                             else:

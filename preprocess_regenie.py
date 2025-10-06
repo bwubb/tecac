@@ -5,11 +5,10 @@ def get_args():
     p=argparse.ArgumentParser(description='Preprocess data for regenie analysis')
     p.add_argument('--vep-list-file',required=True,help='File containing list of VEP CSV files (one per line)')
     p.add_argument('--eigenvec',help='PLINK eigenvec file (optional - skip if using pre-made files)')
-    p.add_argument('--sites',help='Site mapping file (IID SITE format) - required if processing eigenvec')
+    p.add_argument('--samples',required=True,help='Samples list file (one IID per line)')
+    p.add_argument('--sites',help='Site mapping file (IID SITE format) - optional, only used if provided')
     p.add_argument('--controls',help='Controls list file - required if processing eigenvec')
     p.add_argument('--covariates',help='Covariates file (IID and additional columns) - optional, appends additional covariates by matching IID')
-    p.add_argument('--remove-PCs',action='store_true',help='Remove PCs from eigenvec file')
-    p.add_argument('--annotation-only',action='store_true',help='Only generate annotation files (skip eigenvec processing)')
     p.add_argument('-O','--output-prefix',default='',help='Output prefix (optional)')
     return p.parse_args()
 
@@ -81,36 +80,66 @@ def main():
         f.write('M2 vus\n')
         f.write('M3 pathogenic,vus\n')
     
-    # Process eigenvec only if not in annotation-only mode and eigenvec is provided
-    if not args.annotation_only and args.eigenvec:
-        if not args.sites or not args.controls:
-            print("Error: --sites and --controls are required when processing eigenvec file")
-            return
+    # Always create covar and pheno files
+        # Read samples list file with safe header detection
+        samples_df=pd.read_csv(args.samples,header=None)
+        # Check if first row looks like a header (IID, FID, or similar)
+        if len(samples_df) > 0 and samples_df.iloc[0,0] in ['IID','FID','#IID','#FID']:
+            samples=samples_df.iloc[1:,0].tolist()
+            print(f"Detected header in samples file, skipping first row")
+        else:
+            samples=samples_df[0].tolist()
+        print(f"Loaded {len(samples)} samples from samples file")
         
-        # Read eigenvec file with headers
-        eigenvec_df=pd.read_csv(args.eigenvec,sep='\s+')
+        # Initialize covar dataframe
+        if args.eigenvec:
+            if not args.controls:
+                print("Error: --controls is required when processing eigenvec file")
+                return
+            
+            # Read eigenvec file with headers
+            eigenvec_df=pd.read_csv(args.eigenvec,sep='\s+')
+            
+            # Handle #IID column (rename to IID)
+            if '#IID' in eigenvec_df.columns:
+                eigenvec_df=eigenvec_df.rename(columns={'#IID':'IID'})
+            
+            # Add FID column if it doesn't exist (copy of IID)
+            if 'FID' not in eigenvec_df.columns:
+                eigenvec_df['FID']=eigenvec_df['IID']
+            
+            # Filter eigenvec to only include samples in the samples list
+            original_eigenvec_len=len(eigenvec_df)
+            eigenvec_df=eigenvec_df[eigenvec_df['IID'].isin(samples)]
+            print(f"Filtered eigenvec to {len(eigenvec_df)} samples (from {original_eigenvec_len} total)")
+            
+            # Start with filtered eigenvec data
+            merged_df=eigenvec_df.copy()
+        else:
+            # Create minimal covar file with just FID and IID
+            merged_df=pd.DataFrame({'FID':samples,'IID':samples})
         
-        # Handle #IID column (rename to IID)
-        if '#IID' in eigenvec_df.columns:
-            eigenvec_df=eigenvec_df.rename(columns={'#IID':'IID'})
         
-        # Add FID column if it doesn't exist (copy of IID)
-        if 'FID' not in eigenvec_df.columns:
-            eigenvec_df['FID']=eigenvec_df['IID']
-        
-        # Read key-value mapping file and create binary site indicators
-        sites_df=pd.read_csv(args.sites,sep='\s+',names=['IID','SITE'])
-        # Convert SITE to binary indicators (one-hot encoding) with 0/1 integers
-        site_dummies=pd.get_dummies(sites_df['SITE']).astype(int)
-        # Combine with IID
-        sites_df=pd.concat([sites_df['IID'],site_dummies],axis=1)
-        
-        # Merge the dataframes on ID column
-        merged_df=pd.merge(eigenvec_df,sites_df,on='IID',how='left')
-        
-        # Fill any NaN values with 0 (for samples not in any site)
-        site_columns=[col for col in merged_df.columns if col in site_dummies.columns]
-        merged_df[site_columns]=merged_df[site_columns].fillna(0).astype(int)
+        # Add site indicators if sites file is provided
+        if args.sites:
+            print(f"Loading sites file: {args.sites}")
+            sites_df=pd.read_csv(args.sites,sep='\s+',names=['IID','SITE'])
+            # Filter sites to only include samples in our samples list
+            sites_df=sites_df[sites_df['IID'].isin(samples)]
+            print(f"Filtered sites to {len(sites_df)} samples")
+            
+            # Convert SITE to binary indicators (one-hot encoding) with 0/1 integers
+            site_dummies=pd.get_dummies(sites_df['SITE']).astype(int)
+            # Combine with IID
+            sites_df=pd.concat([sites_df['IID'],site_dummies],axis=1)
+            
+            # Merge the dataframes on ID column
+            merged_df=pd.merge(merged_df,sites_df,on='IID',how='left')
+            
+            # Fill any NaN values with 0 (for samples not in any site)
+            site_columns=[col for col in merged_df.columns if col in site_dummies.columns]
+            merged_df[site_columns]=merged_df[site_columns].fillna(0).astype(int)
+            print(f"Sites loaded for {len(sites_df)} samples with {len(site_dummies.columns)} site indicators")
         
         # Add covariates if provided
         if args.covariates:
@@ -120,32 +149,34 @@ def main():
             if 'IID' not in covar_df.columns:
                 print("Error: Covariates file must contain 'IID' column")
                 return
+            # Filter covariates to only include samples in our samples list
+            covar_df=covar_df[covar_df['IID'].isin(samples)]
+            print(f"Filtered covariates to {len(covar_df)} samples")
+            
             merged_df=pd.merge(merged_df,covar_df,on='IID',how='left')
             print(f"Covariates loaded for {len(covar_df)} samples with {len(covar_df.columns)-1} additional columns")
         
-        if args.remove_PCs:
-            # Remove PC columns
-            pc_columns=[col for col in merged_df.columns if col.startswith('PC')]
-            merged_df=merged_df.drop(columns=pc_columns)
         
-        # Write output file
+        # Write covar file
         merged_df.to_csv(f'{prefix}regenie.covar.txt',sep=' ',index=False)
         
-        # Read control samples file
-        controls=pd.read_csv(args.controls,header=None)[0].tolist()
+        # Create phenotype dataframe
+        if args.eigenvec:
+            pheno_df=eigenvec_df[['FID','IID']].copy()
+        else:
+            pheno_df=pd.DataFrame({'FID':samples,'IID':samples})
         
-        # Create phenotype dataframe from merged_df
-        pheno_df=eigenvec_df[['FID','IID']].copy()
+        # Add STATUS column
+        controls_df=pd.read_csv(args.controls,header=None)
+        if len(controls_df) > 0 and controls_df.iloc[0,0] in ['IID','FID','#IID','#FID']:
+            controls=controls_df.iloc[1:,0].tolist()
+        else:
+            controls=controls_df[0].tolist()
         
-        # Add STATUS column - 0 for controls, 1 for cases
         pheno_df['STATUS']=pheno_df['IID'].apply(lambda x: 0 if x in controls else 1)
         
         # Write phenotype file
         pheno_df.to_csv(f'{prefix}regenie.pheno.txt',sep=' ',index=False)
-    elif args.annotation_only:
-        print("Annotation-only mode: Skipping eigenvec processing")
-    else:
-        print("No eigenvec file provided - only VEP files generated")
 
 if __name__=='__main__':
     main()

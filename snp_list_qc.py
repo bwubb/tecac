@@ -29,53 +29,41 @@ def get_variant_count(csv_file):
                 count+=1
     return count
 
-def parse_variant_chunk(csv_file,chunk_start,chunk_size):
-    """Parse a chunk of variants from the CSV file"""
-    variant_data=[]
-    current_pos=0
-    
-    with open(csv_file,'r') as f:
-        for line in f:
-            parts=line.strip().split(',')
-            if len(parts)<6:
-                continue
-                
-            if current_pos>=chunk_start and current_pos<chunk_start+chunk_size:
-                chrom,pos,ref,alt,maf,ns=parts[:6]
-                pos=int(pos)
-                
-                variant_data.append({
-                    'chrom':chrom,
-                    'pos':pos,
-                    'ref':ref,
-                    'alt':alt,
-                    'maf':float(maf) if maf!='.' else 0.0,
-                    'ns':int(ns) if ns!='.' else 0
-                })
-            
-            current_pos+=1
-            
-            if current_pos>=chunk_start+chunk_size:
-                break
-    
-    return pd.DataFrame(variant_data)
 
-def parse_sample_data_for_chunk(csv_file,chunk_variants):
-    """Parse sample data for a specific chunk of variants"""
-    chunk_positions=set(chunk_variants['pos'].values)
-    sample_data=[]
+def parse_data(csv_file,chunk_size):
+    """Parse data efficiently by reading file once and processing in chunks"""
+    print("Reading CSV file and parsing data...")
+    
+    all_variants=[]
+    all_sample_data=[]
+    current_chunk=0
+    current_pos=0
+    chunk_variants=[]
+    chunk_sample_data=[]
     
     with open(csv_file,'r') as f:
-        for line in f:
+        for line_num,line in enumerate(f,1):
+            if line_num%10000==0:
+                print(f"Processed {line_num} lines...")
+                
             parts=line.strip().split(',')
             if len(parts)<6:
                 continue
                 
-            pos=int(parts[1])
-            if pos not in chunk_positions:
-                continue
-                
-            # Parse the remaining comma-separated sample:depth:gt triplets
+            chrom,pos,ref,alt,maf,ns=parts[:6]
+            pos=int(pos)
+            
+            # Add variant to current chunk
+            chunk_variants.append({
+                'chrom':chrom,
+                'pos':pos,
+                'ref':ref,
+                'alt':alt,
+                'maf':float(maf) if maf!='.' else 0.0,
+                'ns':int(ns) if ns!='.' else 0
+            })
+            
+            # Parse sample data for this variant
             for sample_dp_gt in parts[6:]:
                 if ':' in sample_dp_gt:
                     parts_sample=sample_dp_gt.split(':')
@@ -84,15 +72,45 @@ def parse_sample_data_for_chunk(csv_file,chunk_variants):
                         dp=int(parts_sample[1]) if parts_sample[1]!='.' else 0
                         gt=parts_sample[2] if len(parts_sample)>2 else './.'
                         
-                        sample_data.append({
+                        chunk_sample_data.append({
                             'sample':sample,
                             'pos':pos,
                             'dp':dp,
                             'gt':gt
                         })
+            
+            current_pos+=1
+            
+            # Process chunk when it reaches chunk_size
+            if len(chunk_variants)>=chunk_size:
+                print(f"Processing chunk {current_chunk+1} with {len(chunk_variants)} variants...")
+                
+                # Convert to DataFrames
+                variant_df=pd.DataFrame(chunk_variants)
+                sample_df=pd.DataFrame(chunk_sample_data)
+                
+                # Remove duplicates
+                sample_df=sample_df.drop_duplicates(subset=['sample','pos'],keep='first').copy()
+                
+                all_variants.append(variant_df)
+                all_sample_data.append(sample_df)
+                
+                # Reset for next chunk
+                chunk_variants=[]
+                chunk_sample_data=[]
+                current_chunk+=1
     
-    sample_df=pd.DataFrame(sample_data)
-    return sample_df
+    # Process remaining data if any
+    if chunk_variants:
+        print(f"Processing final chunk {current_chunk+1} with {len(chunk_variants)} variants...")
+        variant_df=pd.DataFrame(chunk_variants)
+        sample_df=pd.DataFrame(chunk_sample_data)
+        sample_df=sample_df.drop_duplicates(subset=['sample','pos'],keep='first').copy()
+        all_variants.append(variant_df)
+        all_sample_data.append(sample_df)
+    
+    print(f"Parsed {len(all_variants)} chunks total")
+    return all_variants,all_sample_data
 
 def calculate_coverage_imbalance(variant_df,sample_df,site_data,status_data,site_expected_counts):
     """Calculate coverage imbalance statistics across meta groups"""
@@ -117,8 +135,8 @@ def calculate_coverage_imbalance(variant_df,sample_df,site_data,status_data,site
         if len(pos_data)==0:
             continue
         
-        # Define missing samples: no GT, GT=./., or depth=0
-        pos_data['is_missing']=(pos_data['gt'].isna()) | (pos_data['gt']=='./.') | (pos_data['dp']==0)
+        # Define missing samples: no GT, GT=./., depth=0, or DP='.'
+        pos_data['is_missing']=(pos_data['gt'].isna())|(pos_data['gt']=='./.')|(pos_data['dp']==0)|(pos_data['dp']=='.')
         
         # Calculate missingness per site
         site_missingness={}
@@ -210,59 +228,44 @@ def main():
         site_expected_counts[site] = site_sample_count
         print(f"  Site {site}: {site_sample_count} samples")
     
-    # Get total variant count without loading into memory
-    print("Counting variants...")
-    total_snps=get_variant_count(args.csv_file)
-    print(f"Total variants to process: {total_snps}")
+    # Parse data efficiently in one pass
+    all_variants,all_sample_data=parse_data(args.csv_file,args.chunk_size)
     
-    # Process SNPs in chunks
-    all_imbalance_stats=[]
+    # Process each chunk and write incrementally
+    header_written=False
     
-    for chunk_start in range(0,total_snps,args.chunk_size):
-        chunk_end=min(chunk_start+args.chunk_size,total_snps)
-        print(f"Processing chunk {chunk_start//args.chunk_size + 1}/{(total_snps-1)//args.chunk_size + 1} (variants {chunk_start+1}-{chunk_end})")
-        
-        # Parse variant chunk
-        chunk_variants=parse_variant_chunk(args.csv_file,chunk_start,chunk_end-chunk_start)
-        
-        # Parse sample data for this chunk only
-        chunk_sample_df=parse_sample_data_for_chunk(args.csv_file,chunk_variants)
+    for i,(chunk_variants,chunk_sample_df) in enumerate(zip(all_variants,all_sample_data)):
+        print(f"Calculating statistics for chunk {i+1}/{len(all_variants)}...")
         
         # Calculate imbalance statistics for this chunk
         chunk_stats=calculate_coverage_imbalance(chunk_variants,chunk_sample_df,site_data,status_data,site_expected_counts)
-        all_imbalance_stats.extend(chunk_stats)
+        
+        # Convert to DataFrame and write immediately
+        chunk_df=pd.DataFrame(chunk_stats)
+        
+        # Write header only on first chunk
+        if not header_written:
+            chunk_df.to_csv(args.output,index=False)
+            header_written=True
+            print(f"Started writing results to {args.output}")
+        else:
+            # Append without header
+            chunk_df.to_csv(args.output,mode='a',header=False,index=False)
+        
+        print(f"  Wrote {len(chunk_stats)} variants to output file")
         
         # Clear memory
         del chunk_variants
         del chunk_sample_df
         del chunk_stats
+        del chunk_df
     
-    # Combine all results
-    imbalance_df=pd.DataFrame(all_imbalance_stats)
-    
-    # Save results
-    imbalance_df.to_csv(args.output,index=False)
     print(f"Results saved to {args.output}")
     
     # Print summary statistics
     print("\nMissingness analysis summary:")
-    print(f"Total SNPs analyzed: {len(imbalance_df)}")
-    
-    print(f"\nCase/control analysis:")
-    print(f"Mean case missingness: {imbalance_df['case_missingness'].mean():.4f}")
-    print(f"Mean control missingness: {imbalance_df['control_missingness'].mean():.4f}")
-    print(f"SNPs with case missingness > 0.1: {(imbalance_df['case_missingness']>0.1).sum()}")
-    print(f"SNPs with control missingness > 0.1: {(imbalance_df['control_missingness']>0.1).sum()}")
-    
-    print(f"\nSite missingness analysis:")
-    site_cols=[col for col in imbalance_df.columns if col.endswith('_missingness') and col not in ['case_missingness','control_missingness']]
-    for site_col in site_cols:
-        site_name=site_col.replace('_missingness','')
-        mean_missing=imbalance_df[site_col].mean()
-        high_missing=(imbalance_df[site_col]>0.1).sum()
-        print(f"  {site_name}: mean={mean_missing:.4f}, high missingness(>0.1)={high_missing}")
-    
-    print(f"\nOutput columns: {list(imbalance_df.columns)}")
+    print(f"Results written to {args.output}")
+    print("Summary statistics can be calculated from the output file if needed")
 
 if __name__=='__main__':
     main()

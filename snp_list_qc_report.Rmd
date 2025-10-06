@@ -44,7 +44,7 @@ This report analyzes SNP coverage quality control data to identify the best SNP 
 ```{r data-loading}
 # Load the SNP QC data
 # Update the file path as needed
-snp_data <- read_csv("C:/Users/bwubb/Documents/projects/016-TECAC-TGCT-WES/ExWAS/REGENIE_20250819/snplist_qc.stats.csv") %>%
+snp_data <- read_csv("C:/Users/bwubb/Documents/projects/016-TECAC-TGCT-WES/ExWAS/REGENIE_20250923_ExWAS8/snplist_qc.stats.csv") %>%
   # Filter to only autosomes (chr1-22) and drop chrX, chrY
   filter(chrom %in% paste0("chr", 1:22)) %>%
   mutate(
