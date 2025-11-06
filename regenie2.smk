@@ -8,6 +8,7 @@ os.makedirs("data/work/regenie",exist_ok=True)
 PROJECT=config['project']['name']
 CHROMOSOMES=list(range(1,23)) # Chromosomes 1-22
 
+
 # Determine VCF input method
 if 'all_chr' in config['input'] and config['input']['all_chr']:
     # Single all-chromosome file
@@ -20,7 +21,7 @@ elif 'chromosomes' in config['input'] and config['input']['chromosomes']:
 else:
     raise ValueError("Either 'all_chr' or 'chromosomes' must be specified in config")
 
-date=datetime.now().strftime("%Y%m%d")
+#date=datetime.now().strftime("%Y%m%d")
 
 localrules:merge_chr_snplist,create_vep_list
 wildcard_constraints:
@@ -39,8 +40,11 @@ def get_covariates(config):
 rule run_regenie:
     input:
         expand("data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_single_variant_STATUS.regenie",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES),
-        expand("data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_gene_based_STATUS.regenie",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES)
+        expand("data/work/regenie/{PROJECT_NAME}.chr{CHR}.step2_gene_based_STATUS.regenie",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES),
 
+rule report_regenie:
+    input:
+        expand("{PROJECT_NAME}.regenie_report.{DATE}.html",PROJECT_NAME=PROJECT,DATE=datetime.now().strftime("%Y%m%d"))
 
 rule preprocess_vcf:
     input:
@@ -233,3 +237,15 @@ rule run_step2_gene_based:
         "--aaf-bins 0.01,0.001,0.0001 --strict-check-burden "
         "--check-burden-files --af-cc --bsize 200 --vc-tests skat,skato "
         "--out {params.output_basename}"
+
+rule run_regenie_report:
+    input:
+        expand("data/work/regenie/{{PROJECT_NAME}}.chr{CHR}.step2_single_variant_STATUS.regenie",CHR=CHROMOSOMES),
+        expand("data/work/regenie/{{PROJECT_NAME}}.chr{CHR}.step2_gene_based_STATUS.regenie",CHR=CHROMOSOMES),
+        "{PROJECT_NAME}.pathogenic_vus.csv"
+    output:
+        "{PROJECT_NAME}.regenie_report.{DATE}.html"
+    shell:
+        """
+        R -e "rmarkdown::render('report_regenie.Rmd',params=list(project_name='{wildcards.PROJECT_NAME}'),output_file='{wildcards.PROJECT_NAME}.regenie_report.{wildcards.DATE}.html')"
+        """
