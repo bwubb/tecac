@@ -98,15 +98,20 @@ def main():
                 return
             
             # Read eigenvec file with headers
-            eigenvec_df=pd.read_csv(args.eigenvec,sep='\s+')
+            eigenvec_df=pd.read_csv(args.eigenvec,sep=r'\s+')
             
-            # Handle #IID column (rename to IID)
+            # Handle PLINK headers (#FID, #IID) - Regenie expects FID and IID without #
+            if '#FID' in eigenvec_df.columns:
+                eigenvec_df=eigenvec_df.rename(columns={'#FID':'FID'})
             if '#IID' in eigenvec_df.columns:
                 eigenvec_df=eigenvec_df.rename(columns={'#IID':'IID'})
             
-            # Add FID column if it doesn't exist (copy of IID)
-            if 'FID' not in eigenvec_df.columns:
-                eigenvec_df['FID']=eigenvec_df['IID']
+            # Ensure FID is the first column (Regenie requires FID, IID as first two columns)
+            if 'FID' in eigenvec_df.columns and eigenvec_df.columns[0] != 'FID':
+                # Reorder: FID first, then IID, then everything else
+                cols = eigenvec_df.columns.tolist()
+                cols.remove('FID')
+                eigenvec_df = eigenvec_df[['FID'] + cols]
             
             # Filter eigenvec to only include samples in the samples list
             original_eigenvec_len=len(eigenvec_df)
@@ -123,7 +128,7 @@ def main():
         # Add site indicators if sites file is provided
         if args.sites:
             print(f"Loading sites file: {args.sites}")
-            sites_df=pd.read_csv(args.sites,sep='\s+',names=['IID','SITE'])
+            sites_df=pd.read_csv(args.sites,sep=r'\s+',names=['IID','SITE'])
             # Filter sites to only include samples in our samples list
             sites_df=sites_df[sites_df['IID'].isin(samples)]
             print(f"Filtered sites to {len(sites_df)} samples")
@@ -144,7 +149,7 @@ def main():
         # Add covariates if provided
         if args.covariates:
             print(f"Loading covariates file: {args.covariates}")
-            covar_df=pd.read_csv(args.covariates,sep='\s+')
+            covar_df=pd.read_csv(args.covariates,sep=r'\s+')
             # Ensure IID column exists
             if 'IID' not in covar_df.columns:
                 print("Error: Covariates file must contain 'IID' column")
@@ -157,7 +162,7 @@ def main():
             print(f"Covariates loaded for {len(covar_df)} samples with {len(covar_df.columns)-1} additional columns")
         
         
-        # Write covar file
+        # Write covar file - Regenie needs FID, IID, then numeric covariates only
         merged_df.to_csv(f'{prefix}regenie.covar.txt',sep=' ',index=False)
         
         # Create phenotype dataframe

@@ -1,7 +1,7 @@
 ---
 title: "REGENIE Exome-Wide Association Analysis Report"
 author: "Brad Wubbenhorst"
-output: 
+output:
   html_document:
     theme: paper
     toc: true
@@ -49,9 +49,86 @@ library(knitr)
 library(kableExtra)
 library(ggrepel)
 library(qqman)
+library(DiagrammeR)
 
 # Set consistent theme
 theme_set(theme_minimal(base_size = 12))
+```
+
+# REGENIE ExWAS Pipeline Flowchart
+
+```{r regenie_flowchart, echo=FALSE, fig.cap="REGENIE Exome-Wide Association Pipeline"}
+grViz("
+digraph regenie_pipeline {
+
+  # Global settings
+  graph [rankdir = TB, fontsize = 12, fontname = Helvetica]
+  node [fontname = Helvetica, fontsize = 11, shape = box, style = filled, color = DarkBlue]
+
+  # Input nodes
+  input_vcf [label = 'Multi-chromosome VCF\\nfiles', fillcolor = Khaki, fontcolor = Black, shape = folder]
+  samples [label = 'Sample list', fillcolor = Khaki, fontcolor = Black, shape = note]
+  pheno [label = 'Phenotypes', fillcolor = Khaki, fontcolor = Black, shape = note]
+  covar [label = 'Covariates', fillcolor = Khaki, fontcolor = Black, shape = note]
+
+  # Processing nodes
+  preprocess [label = 'VCF Preprocessing\\n(normalize, filter, QC)', fillcolor = LightSkyBlue]
+  pgen_convert [label = 'Convert to PLINK2\\nPGEN format', fillcolor = LightSkyBlue]
+
+  # Step 1 nodes
+  step1_chr1 [label = 'Step 1\\nChr 1\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
+  step1_chr_ellipsis [label = '...', fillcolor = LavenderBlush, shape = parallelogram]
+  step1_chr22 [label = 'Step 1\\nChr 22\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
+
+  merge_step1 [label = 'Merge Step 1\\nresults', fillcolor = MistyRose, shape = diamond]
+
+  # Step 2 nodes
+  step2_single [label = 'Step 2 Single-Variant\\nAssociation Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
+  step2_gene [label = 'Step 2 Gene-Based\\nBurden Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
+
+  # Annotation and output
+  vep_annotate [label = 'VEP Annotation\\n(pathogenic/VUS variants)', fillcolor = LemonChiffon]
+  report_gen [label = 'Generate HTML Report\\n(statistics, plots, tables)', fillcolor = AliceBlue, shape = note]
+
+  # Connections
+  input_vcf -> preprocess
+  samples -> preprocess
+  preprocess -> pgen_convert
+  preprocess -> vep_annotate
+
+  pgen_convert -> step1_chr1
+  pgen_convert -> step1_chr_ellipsis
+  pgen_convert -> step1_chr22
+
+  step1_chr1 -> merge_step1 [style = dotted]
+  step1_chr_ellipsis -> merge_step1 [style = dotted]
+  step1_chr22 -> merge_step1 [style = dotted]
+
+  merge_step1 -> step2_single
+  merge_step1 -> step2_gene
+  vep_annotate -> step2_gene
+
+  step2_single -> report_gen
+  step2_gene -> report_gen
+
+  # Invisible edges for layout
+  {rank = same; step1_chr1; step1_chr_ellipsis; step1_chr22}
+  {rank = same; step2_single; step2_gene}
+
+  # Subgraph for parallel processing
+  subgraph cluster_parallel {
+    label = 'Parallel Processing\\n(Chromosome-level)'
+    fontsize = 14
+    style = filled
+    fillcolor = WhiteSmoke
+    step1_chr1
+    step1_chr_ellipsis
+    step1_chr22
+    step2_single
+    step2_gene
+  }
+}
+")
 ```
 
 ```{r load-data,echo=FALSE,message=FALSE,warning=FALSE}
@@ -65,7 +142,7 @@ if(is.null(params$project_name) || params$project_name == "") {
 single_variant_list <- list()
 
 for(i in 1:22) {
-  file_path <- paste0("data/work/regenie/", params$project_name, ".chr", i, ".step2_single_variant_STATUS.regenie")
+  file_path <- paste0("data/final/", params$project_name, ".chr", i, ".step2_single_variant_STATUS.regenie")
   if(file.exists(file_path)) {
     single_variant_list[[i]] <- read_delim(file_path, delim = " ", col_names = TRUE, trim_ws = TRUE)
   }
@@ -90,7 +167,7 @@ single_variant <- bind_rows(single_variant_list) %>%
   select(-ID_PARTS)
 
 # Load pre-filtered pathogenic/VUS annotations
-pathogenic_vus_file <- "PMBB-TGCT-ExWAS.pathogenic_vus.csv"
+pathogenic_vus_file <- paste0("data/final/", params$project_name, ".pathogenic_vus.csv")
 if(file.exists(pathogenic_vus_file)) {
   pathogenic_annotations <- read_csv(pathogenic_vus_file, show_col_types = FALSE) %>%
     select(ID, Gene, Variant.LoF_level, HGVSc, HGVSp)
@@ -103,9 +180,10 @@ if(file.exists(pathogenic_vus_file)) {
 gene_based_list <- list()
 
 for(i in 1:22) {
-  file_path <- paste0("data/work/regenie/", params$project_name, ".chr", i, ".step2_gene_based_STATUS.regenie")
+  file_path <- paste0("data/final/", params$project_name, ".chr", i, ".step2_gene_based_STATUS.regenie")
   if(file.exists(file_path)) {
-    gene_based_list[[i]] <- read_delim(file_path, delim = " ", col_names = TRUE, trim_ws = TRUE, skip = 1)
+    # Skip comment lines (e.g. "# Regenie step 2") so header is CHROM GENPOS ... BETA ...; wrong skip misaligns BETA.
+    gene_based_list[[i]] <- read_delim(file_path, delim = " ", col_names = TRUE, trim_ws = TRUE, comment = "#")
   }
 }
 
@@ -117,7 +195,21 @@ gene_based <- bind_rows(gene_based_list) %>%
          PVAL = 10^(-LOG10P),
          PVAL_ADJ = p.adjust(PVAL, method = "BH"),
          LOG10P_ADJ = -log10(PVAL_ADJ),
-         OR = exp(BETA)) %>%
+         OR = exp(BETA))
+
+# Data quality check
+if(any(is.na(gene_based$LOG10P))) {
+  warning(sprintf("Warning: %d gene-based tests have NA LOG10P values", sum(is.na(gene_based$LOG10P))))
+}
+if(any(is.infinite(gene_based$LOG10P))) {
+  warning(sprintf("Warning: %d gene-based tests have infinite LOG10P values (p=0)", sum(is.infinite(gene_based$LOG10P))))
+}
+# BETA should be log-OR (typically between about -5 and 5). If not, column alignment may be wrong.
+if("BETA" %in% names(gene_based) && any(abs(gene_based$BETA) > 20, na.rm = TRUE)) {
+  warning("Some gene-based BETA values are very large (|BETA| > 20). Check that Regenie output column order matches expected (CHROM GENPOS ... BETA SE LOG10P).")
+}
+
+gene_based <- gene_based %>%
   # Extract gene and mask information from ID column
   mutate(
     GENE = sub("\\..*", "", ID),
@@ -134,7 +226,7 @@ gene_based <- bind_rows(gene_based_list) %>%
 
 ```{r summary-stats,echo=FALSE,message=FALSE,warning=FALSE}
 # Load phenotype file for actual case/control numbers
-pheno_file <- paste0(params$project_name, ".regenie.pheno.txt")
+pheno_file <- paste0("data/final/", params$project_name, ".regenie.pheno.txt")
 pheno <- read_delim(pheno_file, delim = " ", col_names = TRUE, trim_ws = TRUE)
 
 # Build proper summary table with scalar values
@@ -281,17 +373,26 @@ qq_data <- single_variant %>%
         expected = sort(-log10(ppoints(length(LOG10P))), decreasing = TRUE)
     )
 
-# Calculate lambda GC correctly
+# Verify p-values are valid for lambda calculation
+pval_check <- all(single_variant$PVAL > 0 & single_variant$PVAL <= 1, na.rm = TRUE)
+cat("P-value validation: All p-values in valid range (0,1] =", pval_check, "\n")
+
+# Calculate lambda GC
 chisq <- qchisq(1 - single_variant$PVAL, 1)
 lambda_gc <- median(chisq, na.rm = TRUE) / qchisq(0.5, 1)
-cat("Lambda GC formula: median(qchisq(1 - P, 1)) / qchisq(0.5, 1) =", round(lambda_gc, 3), "\n")
+
+cat("Lambda GC:", round(lambda_gc, 3), "\n")
+cat("Interpretation: λ < 1.0 indicates deflation (conservative test statistics)\n")
+cat("Possible causes: REGENIE over-correction, QC filtering, or case-control imbalance\n\n")
 
 qq_plot <- ggplot(qq_data, aes(x = expected, y = observed)) +
     geom_point(alpha = 0.6, color = "#2E86AB") +
     geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    # Add deflation demonstration line (lambda = 0.8 would be flatter)
+    geom_abline(intercept = 0, slope = lambda_gc, color = "blue", linetype = "dotted", alpha = 0.7) +
     labs(title = "Q-Q Plot: Single-Variant P-values",
-         subtitle = paste("Lambda GC:", round(lambda_gc, 3), "| Note: Inflation metrics are less interpretable in ExWAS due to sparse, low-frequency variant testing"),
-         x = "Expected -log10(p-value)", 
+         subtitle = paste("Lambda GC:", round(lambda_gc, 3), "| Deflation (λ < 1.0) indicates test statistics are less significant than expected"),
+         x = "Expected -log10(p-value)",
          y = "Observed -log10(p-value)") +
     theme(plot.title = element_text(size = 14, face = "bold"),
           plot.subtitle = element_text(size = 10, color = "gray50"))
@@ -440,7 +541,8 @@ gene_based_plot <- gene_based_plot %>%
 # Calculate FDR cutoff for the line
 fdr_cutoff <- min(gene_based$LOG10P[gene_based$PVAL_ADJ < 0.05], na.rm = TRUE)
 
-volcano_plot <- ggplot(gene_based_plot, aes(x = BETA, y = LOG10P, color = Significant)) +
+# Ensure BETA is numeric for x-axis (log-OR; typical range about -5 to 5)
+volcano_plot <- ggplot(gene_based_plot, aes(x = as.numeric(BETA), y = LOG10P, color = Significant)) +
   geom_point(alpha = 0.6, size = 1.2) +
   geom_hline(yintercept = fdr_cutoff, linetype = "dashed", color = "blue", alpha = 0.7) +
   geom_vline(xintercept = 0, linetype = "dotted", color = "grey40") +
@@ -448,9 +550,10 @@ volcano_plot <- ggplot(gene_based_plot, aes(x = BETA, y = LOG10P, color = Signif
                   box.padding = 0.3, point.padding = 0.1) +
   scale_color_manual(values = c("gray60", "red"), 
                      labels = c("Not Significant", "FDR < 0.05")) +
+  scale_x_continuous(limits = c(NA, NA), oob = scales::oob_keep) +
   labs(title = "Volcano Plot: Gene-Based Burden Testing by Mask",
        subtitle = paste("FDR significant genes:", sum(gene_based_plot$Significant)),
-       x = "Effect Size (Beta)",
+       x = "Effect Size (Beta / log-OR)",
        y = "-log10(p-value)",
        color = "Significance") +
   facet_wrap(~MASK, scales = "free_y") +
@@ -479,7 +582,7 @@ if(nrow(chek2_results) > 0) {
         col.names = c("Gene", "Mask", "Threshold", "Chr", "Pos", "Alt Allele", "Alt Freq", 
                      "Beta", "OR", "SE", "-log10(P)", "P-value", "FDR P-value", "-log10(FDR P)")) %>%
     kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
-    column_spec(c(8, 10, 11), color = ifelse(chek2_results$PVAL_ADJ < 0.05, "red", "black"))
+    column_spec(c(8, 10, 11), color = ifelse(!is.na(chek2_results$PVAL_ADJ) & chek2_results$PVAL_ADJ < 0.05, "red", "black"))
   
   # Summary of CHEK2 results
   cat("\n**CHEK2 Summary:**\n")

@@ -1,0 +1,889 @@
+---
+title: "ExWAS Quality Control Report"
+author: "Automated QC Pipeline"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: hide
+params:
+  project: "PROJECT"
+  controls_file: "controls.txt"
+  data_dir: "data"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
+library(tidyverse)
+library(knitr)
+library(yaml)
+
+# Read config file
+config <- read_yaml("config.yml")
+
+# Project settings (params override config, for snakemake compatibility)
+PROJECT <- if (!is.null(params$project)) params$project else config$project$name
+CONTROLS_FILE <- if (!is.null(params$controls_file)) params$controls_file else config$input$controls
+DATA_DIR <- if (!is.null(params$data_dir)) params$data_dir else "data"
+
+# QC thresholds - always from config
+MIND_THR <- as.numeric(config$qc$mind_thr)
+MAF_THR <- as.numeric(config$qc$maf_thr)
+GENO_THR <- as.numeric(config$qc$geno_thr)
+HWE_THR <- as.numeric(config$qc$hwe_thr)
+```
+
+# Overview
+
+This report summarizes quality control performed on whole exome sequencing data for the **`r PROJECT`** study.
+
+## QC Pipeline Steps
+
+1. **Sex Check**: Remove samples with ambiguous sex (chrX F-statistic)
+2. **Variant Quality Filter**: Filter variants based on high-quality heterozygotes (HQHet)
+3. **Variant-Level Filters**: Apply genotype missingness, MAF, and HWE filters
+4. **Sample Missingness**: Remove samples with excessive missing genotypes (calculated on filtered variants)
+5. **Heterozygosity**: Remove samples with outlier heterozygosity rates (calculated on filtered variants)
+6. **Population Structure**: Principal component analysis
+
+---
+
+# Load Data
+
+```{r load-data}
+# Load controls file and create phenotype status
+if (file.exists(CONTROLS_FILE)) {
+  controls <- trimws(read.table(CONTROLS_FILE, header = FALSE, stringsAsFactors = FALSE, colClasses = "character")[[1]])
+} else {
+  warning(paste("Controls file not found:", CONTROLS_FILE))
+  controls <- character(0)
+}
+
+# Load sex inference results
+sex_file <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".sex_inference.txt"))
+if (!file.exists(sex_file)) stop(paste("Required file not found:", sex_file))
+sex_report <- read.table(sex_file, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+
+# Load missingness report
+miss_file <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".missingness_report.txt"))
+if (!file.exists(miss_file)) stop(paste("Required file not found:", miss_file))
+miss_report <- read.csv(miss_file, stringsAsFactors = FALSE)
+
+# Load heterozygosity report
+het_file <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".heterozygosity_report.txt"))
+if (!file.exists(het_file)) stop(paste("Required file not found:", het_file))
+het_report <- read.csv(het_file, stringsAsFactors = FALSE)
+
+# Load PCA results
+pca_file <- file.path(DATA_DIR, "preprocess", paste0(PROJECT, ".build.eigenvec"))
+if (!file.exists(pca_file)) stop(paste("Required file not found:", pca_file))
+pca <- read.table(pca_file, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+
+# Load variant type counts (prefilter)
+prefilter_counts <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".prefilter.variant_types.txt"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
+      mutate(CHR = chr)
+  } else {
+    warning(paste("File not found:", f))
+    data.frame(TYPE = character(0), COUNT = numeric(0), CHR = integer(0))
+  }
+}) %>% bind_rows()
+
+# Load variant type counts (postfilter)
+postfilter_counts <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".postfilter.variant_types.txt"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
+      mutate(CHR = chr)
+  } else {
+    warning(paste("File not found:", f))
+    data.frame(TYPE = character(0), COUNT = numeric(0), CHR = integer(0))
+  }
+}) %>% bind_rows()
+
+# Load variant counts after plink filtering
+postplink_counts <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".postplink.variant_count.txt"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+  } else {
+    warning(paste("File not found:", f))
+    data.frame(VARIANTS = numeric(0))
+  }
+}) %>% bind_rows()
+
+# Load plink filter metrics
+plink_filter_metrics <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".plink_filter_metrics.txt"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+  } else {
+    warning(paste("File not found:", f))
+    data.frame(FILTER = character(0), VARIANTS_REMOVED = numeric(0))
+  }
+}) %>% bind_rows()
+
+# Load variant QC metrics for distribution plots
+variant_maf <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "plink", paste0(PROJECT, ".chr", chr, ".afreq"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
+      mutate(CHR = chr)
+  } else {
+    warning(paste("File not found:", f))
+    data.frame(CHR = chr)
+  }
+}) %>% bind_rows()
+
+variant_miss <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "plink", paste0(PROJECT, ".chr", chr, ".vmiss"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
+      mutate(CHR = chr)
+  } else {
+    warning(paste("File not found:", f))
+    data.frame(CHR = chr)
+  }
+}) %>% bind_rows()
+
+variant_hwe <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "plink", paste0(PROJECT, ".chr", chr, ".hardy"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
+      mutate(CHR = chr)
+  } else {
+    warning(paste("File not found:", f))
+    data.frame(CHR = chr)
+  }
+}) %>% bind_rows()
+
+# Rename sex inference Status column to Sex first
+colnames(sex_report)[colnames(sex_report) == "Status"] <- "Sex"
+
+# Add phenotype status based on controls
+if (!is.null(controls) && length(controls) > 0) {
+  sex_report$Status <- ifelse(trimws(sex_report[,1]) %in% controls, "Control", "Case")
+  miss_report$Status <- ifelse(trimws(miss_report[,1]) %in% controls, "Control", "Case")
+  het_report$Status <- ifelse(trimws(het_report[,1]) %in% controls, "Control", "Case")
+  pca$Status <- ifelse(trimws(pca[,1]) %in% controls, "Control", "Case")
+} else {
+  sex_report$Status <- rep(NA_character_, nrow(sex_report))
+  miss_report$Status <- rep(NA_character_, nrow(miss_report))
+  het_report$Status <- rep(NA_character_, nrow(het_report))
+  pca$Status <- rep(NA_character_, nrow(pca))
+}
+```
+
+---
+
+# 1. Sex Check (chrX F-statistic)
+
+## Method
+
+Sex is inferred from chromosome X heterozygosity using the F-statistic:
+
+- **F > 0.8**: Male (mostly homozygous/hemizygous on X)
+- **F < 0.2**: Female (heterozygous on X)
+- **0.2 ≤ F ≤ 0.8**: Ambiguous/Problem (excluded)
+
+```{r sex-check-summary}
+sex_fail <- sex_report %>% filter(Sex == "AMBIGUOUS")
+sex_pass <- sex_report %>% filter(Sex != "AMBIGUOUS")
+
+total_samples <- nrow(sex_report)
+failed_samples <- nrow(sex_fail)
+passing_samples <- nrow(sex_pass)
+```
+
+## Results
+
+- **Total Samples**: `r format(total_samples, big.mark = ",")`
+- **Failed Sex Check**: `r format(failed_samples, big.mark = ",")` (`r round(100 * failed_samples / total_samples, 2)`%)
+- **Passing Sex Check**: `r format(passing_samples, big.mark = ",")` (`r round(100 * passing_samples / total_samples, 2)`%)
+
+```{r sex-check-by-status, eval=!is.null(controls)}
+if (!is.null(controls) && "Status" %in% colnames(sex_fail)) {
+  sex_fail_summary <- sex_fail %>%
+    group_by(Status) %>%
+    summarise(
+      N_Failed = n(),
+      .groups = "drop"
+    )
+  
+  kable(sex_fail_summary, caption = "Sex Check Failures by Case/Control Status")
+}
+```
+
+## F-statistic Distribution
+
+```{r sex-f-distribution, fig.height=5}
+ggplot(sex_report, aes(x = F_sex, fill = Sex)) +
+  geom_histogram(bins = 50, alpha = 0.7) +
+  geom_vline(xintercept = c(0.2, 0.8), linetype = "dashed", color = "red") +
+  scale_fill_manual(values = c("MALE" = "steelblue", "FEMALE" = "pink", "AMBIGUOUS" = "orange")) +
+  labs(
+    title = "Distribution of chrX Homozygosity (Sex Inference)",
+    x = "F-statistic (O(HOM)/OBS_CT)",
+    y = "Count",
+    fill = "Inferred Sex"
+  ) +
+  theme_minimal()
+```
+
+---
+
+# 2. Variant Quality Filtering
+
+## Method
+
+Variants are filtered based on the presence of high-quality heterozygotes:
+
+- **Filter**: `COUNT(GT="0/1" && DP≥10 && GQ≥20 && VAF>0.2) = 0`
+- **Action**: Tag as `NoHQHet`, then exclude non-PASS variants
+
+Variants are also filtered based on low call rate:
+- **Filter**: `INFO/F_MISSING > 0.05`
+- **Action**: Tag as `LowCallRate`, then exclude non-PASS variants
+
+```{r variant-filtering}
+if (nrow(prefilter_counts) > 0 && "TYPE" %in% names(prefilter_counts) && "COUNT" %in% names(prefilter_counts)) {
+  prefilter_total <- sum(prefilter_counts$COUNT[prefilter_counts$TYPE == "TOTAL"], na.rm = TRUE)
+} else {
+  prefilter_total <- 0
+}
+if (nrow(postfilter_counts) > 0 && "TYPE" %in% names(postfilter_counts) && "COUNT" %in% names(postfilter_counts)) {
+  postfilter_total <- sum(postfilter_counts$COUNT[postfilter_counts$TYPE == "TOTAL"], na.rm = TRUE)
+} else {
+  postfilter_total <- 0
+}
+variants_removed <- prefilter_total - postfilter_total
+```
+
+## Results
+
+- **Variants (Pre-filter)**: `r format(prefilter_total, big.mark = ",")`
+- **Variants Removed**: `r format(variants_removed, big.mark = ",")` (`r round(100 * variants_removed / prefilter_total, 2)`%)
+- **Variants (Post-filter)**: `r format(postfilter_total, big.mark = ",")` (`r round(100 * postfilter_total / prefilter_total, 2)`%)
+
+### Variant Types Before and After Filtering
+
+```{r variant-types-table}
+variant_summary <- prefilter_counts %>%
+  filter(TYPE != "TOTAL") %>%
+  group_by(TYPE) %>%
+  summarise(Prefilter = sum(COUNT), .groups = "drop") %>%
+  left_join(
+    postfilter_counts %>%
+      filter(TYPE != "TOTAL") %>%
+      group_by(TYPE) %>%
+      summarise(Postfilter = sum(COUNT), .groups = "drop"),
+    by = "TYPE"
+  ) %>%
+  mutate(
+    Removed = Prefilter - Postfilter,
+    Pct_Removed = round(100 * Removed / Prefilter, 2)
+  )
+
+kable(variant_summary, 
+      format.args = list(big.mark = ","),
+      caption = "Variant Counts by Type")
+```
+
+```{r variant-types-plot, fig.height=5}
+variant_summary_long <- variant_summary %>%
+  select(TYPE, Prefilter, Postfilter) %>%
+  pivot_longer(-TYPE, names_to = "Filter_Stage", values_to = "Count")
+
+ggplot(variant_summary_long, aes(x = TYPE, y = Count, fill = Filter_Stage)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("Prefilter" = "#E74C3C", "Postfilter" = "#3498DB")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Variant Counts Before and After Quality Filtering",
+    x = "Variant Type",
+    y = "Count",
+    fill = "Stage"
+  ) +
+  theme_minimal()
+```
+
+---
+
+# 3. Variant-Level Filters (Plink)
+
+## Method
+
+Additional variant filters applied using Plink2 **to SNPs only** before sample QC:
+
+- **Genotype Missingness**: `--geno `r GENO_THR`` (`r GENO_THR * 100`%)
+- **Minor Allele Frequency**: `--maf `r MAF_THR`` (`r MAF_THR * 100`%)
+- **Hardy-Weinberg Equilibrium**: `--hwe `r HWE_THR` midp`
+- **LD Pruning**: `--indep-pairwise 200 20 0.2` (window 200 SNPs, step 20, r² threshold 0.2)
+
+These filters are applied to SNPs passing the HQHet filter. Sample missingness and heterozygosity are then calculated on these filtered SNPs.
+
+```{r plink-filtering}
+# Calculate totals
+variants_before_plink <- ifelse(length(postfilter_total) > 0 && !is.na(postfilter_total), postfilter_total, 0)
+variants_after_plink <- ifelse(nrow(postplink_counts) > 0 && "VARIANTS" %in% names(postplink_counts), sum(postplink_counts$VARIANTS, na.rm = TRUE), 0)
+variants_removed_plink <- variants_before_plink - variants_after_plink
+
+# Count SNPs vs non-SNPs from postfilter variant types
+if (nrow(postfilter_counts) > 0 && "TYPE" %in% names(postfilter_counts) && "COUNT" %in% names(postfilter_counts)) {
+  snp_counts <- postfilter_counts %>% filter(TYPE == "SNP")
+  indel_counts <- postfilter_counts %>% filter(TYPE == "INDEL")
+  other_counts <- postfilter_counts %>% filter(TYPE %in% c("MNP", "OTHER"))
+  
+  total_snps <- sum(snp_counts$COUNT, na.rm = TRUE)
+  total_indels <- sum(indel_counts$COUNT, na.rm = TRUE)
+  total_other <- sum(other_counts$COUNT, na.rm = TRUE)
+} else {
+  total_snps <- 0
+  total_indels <- 0
+  total_other <- 0
+}
+total_non_snps <- total_indels + total_other
+
+# Aggregate filter metrics
+if (nrow(plink_filter_metrics) > 0 && "FILTER" %in% names(plink_filter_metrics) && "VARIANTS_REMOVED" %in% names(plink_filter_metrics)) {
+  filter_summary <- plink_filter_metrics %>%
+    group_by(FILTER) %>%
+    summarise(Variants_Removed = sum(VARIANTS_REMOVED, na.rm = TRUE), .groups = "drop") %>%
+    mutate(
+      Pct_of_Input = ifelse(variants_before_plink > 0, round(100 * Variants_Removed / variants_before_plink, 2), 0)
+    )
+
+  ld_prune_summary <- plink_filter_metrics %>%
+    filter(FILTER == "PRUNE") %>%
+    mutate(CHR = factor(CHR, levels = 1:22)) %>%
+    group_by(CHR) %>%
+    summarise(
+      Variants_Removed = sum(VARIANTS_REMOVED, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(as.numeric(as.character(CHR)))
+
+  total_ld_pruned <- sum(ld_prune_summary$Variants_Removed, na.rm = TRUE)
+  pct_ld_pruned <- ifelse(variants_before_plink > 0, round(100 * total_ld_pruned / variants_before_plink, 2), 0)
+} else {
+  filter_summary <- data.frame(FILTER = character(0), Variants_Removed = numeric(0), Pct_of_Input = numeric(0))
+  ld_prune_summary <- data.frame(CHR = integer(0), Variants_Removed = numeric(0))
+  total_ld_pruned <- 0
+  pct_ld_pruned <- 0
+}
+```
+
+## Results
+
+- **Variants (Before Plink Filters)**: `r format(variants_before_plink, big.mark = ",")` (after HQHet)
+  - SNPs: `r format(total_snps, big.mark = ",")` (`r round(100 * total_snps / variants_before_plink, 1)`%)
+  - Indels: `r format(total_indels, big.mark = ",")` (`r round(100 * total_indels / variants_before_plink, 1)`%)
+  - Other (MNPs, etc.): `r format(total_other, big.mark = ",")` (`r round(100 * total_other / variants_before_plink, 1)`%)
+- **Non-SNPs Removed** (--snps-only): `r format(total_non_snps, big.mark = ",")` (`r round(100 * total_non_snps / variants_before_plink, 2)`%)
+- **SNPs Removed by QC Filters**: `r format(variants_removed_plink - total_non_snps, big.mark = ",")` (`r round(100 * (variants_removed_plink - total_non_snps) / variants_before_plink, 2)`%)
+- **Variants (After All Filters)**: `r format(variants_after_plink, big.mark = ",")` (SNPs only, `r round(100 * variants_after_plink / variants_before_plink, 2)`% of input)
+- **LD Pruning Removed** (`prune.out`): `r format(total_ld_pruned, big.mark = ",")` (`r pct_ld_pruned`% of input SNPs)
+
+### LD Pruning Impact
+
+```{r ld-pruning-table}
+if (nrow(ld_prune_summary) > 0) {
+  ld_prune_summary <- ld_prune_summary %>%
+    mutate(
+      CHR = as.integer(as.character(CHR)),
+      Pct_of_Input = ifelse(variants_before_plink > 0, round(100 * Variants_Removed / variants_before_plink, 2), 0)
+    )
+  
+  kable(ld_prune_summary,
+        format.args = list(big.mark = ","),
+        caption = "LD Pruning Removals by Chromosome",
+        col.names = c("Chromosome", "Variants Removed", "% of Input SNPs"))
+} else {
+  cat("No LD pruning counts were recorded in the filter metrics.\n")
+}
+```
+
+```{r ld-pruning-plot, fig.height=5}
+if (nrow(ld_prune_summary) > 0) {
+  ggplot(ld_prune_summary, aes(x = factor(CHR, levels = CHR), y = Variants_Removed)) +
+    geom_col(fill = "#8E44AD") +
+    scale_y_continuous(labels = scales::comma) +
+    labs(
+      title = "Variants Removed by LD Pruning",
+      x = "Chromosome",
+      y = "Variants Removed (prune.out)",
+      caption = paste0("Total removed: ", format(total_ld_pruned, big.mark = ","), 
+                       " (", pct_ld_pruned, "% of input SNPs)")
+    ) +
+    theme_minimal()
+}
+```
+
+### Distribution Analysis
+
+These distributions show the spread of variant-level QC metrics and where thresholds are set.
+
+```{r maf-distribution, fig.height=5}
+# Calculate MAF (minimum of ALT_FREQS and 1-ALT_FREQS)
+variant_maf$MAF <- pmin(variant_maf$ALT_FREQS, 1 - variant_maf$ALT_FREQS)
+
+ggplot(variant_maf, aes(x = MAF)) +
+  geom_histogram(bins = 100, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = MAF_THR, linetype = "dashed", color = "red", linewidth = 1) +
+  scale_x_continuous(labels = scales::percent, breaks = seq(0, 0.1, 0.01), limits = c(0, 0.1)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Minor Allele Frequency Distribution (0-10%)",
+    x = "MAF",
+    y = "Variant Count",
+    caption = paste0("Red line = ", MAF_THR * 100, "% threshold | ", 
+                     format(sum(variant_maf$MAF < MAF_THR), big.mark = ","), 
+                     " variants (", 
+                     round(100 * sum(variant_maf$MAF < MAF_THR) / nrow(variant_maf), 1),
+                     "%) below threshold")
+  ) +
+  theme_minimal()
+```
+
+```{r geno-distribution, fig.height=5}
+ggplot(variant_miss, aes(x = F_MISS)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = GENO_THR, linetype = "dashed", color = "red", linewidth = 1) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Variant Genotype Missingness Distribution",
+    x = "Missingness Rate",
+    y = "Variant Count",
+    caption = paste0("Red line = ", GENO_THR * 100, "% threshold | ", 
+                     format(sum(variant_miss$F_MISS > GENO_THR), big.mark = ","), 
+                     " variants (", 
+                     round(100 * sum(variant_miss$F_MISS > GENO_THR) / nrow(variant_miss), 1),
+                     "%) above threshold")
+  ) +
+  theme_minimal()
+```
+
+```{r hwe-distribution, fig.height=5}
+# Transform to -log10(P) for better visualization
+variant_hwe$neg_log10_P <- -log10(variant_hwe$P)
+threshold_line <- -log10(HWE_THR)
+
+ggplot(variant_hwe, aes(x = neg_log10_P)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = threshold_line, linetype = "dashed", color = "red", linewidth = 1) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Hardy-Weinberg Equilibrium Distribution",
+    x = "-log10(P-value)",
+    y = "Variant Count",
+    caption = paste0("Red line = -log10(", HWE_THR, ") = ", round(threshold_line, 1), " | ", 
+                     format(sum(variant_hwe$P < HWE_THR, na.rm = TRUE), big.mark = ","), 
+                     " variants (", 
+                     round(100 * sum(variant_hwe$P < HWE_THR, na.rm = TRUE) / nrow(variant_hwe), 1),
+                     "%) above threshold (more deviant)")
+  ) +
+  theme_minimal()
+```
+
+---
+
+# 4. Sample Missingness
+
+## Method
+
+Sample missingness is calculated across all variants passing quality filters (HQHet + geno/maf/hwe). Samples with excessive missing genotypes are excluded.
+
+- **Threshold**: F_MISS > `r MIND_THR` (`r MIND_THR * 100`%)
+
+```{r missingness-summary}
+total_after_sex <- passing_samples
+failed_missingness <- nrow(miss_report)
+passing_missingness <- total_after_sex - failed_missingness
+```
+
+## Results
+
+- **Samples (Post Sex-Check)**: `r format(total_after_sex, big.mark = ",")`
+- **Failed Missingness**: `r format(failed_missingness, big.mark = ",")` (`r round(100 * failed_missingness / total_after_sex, 2)`%)
+- **Passing Missingness**: `r format(passing_missingness, big.mark = ",")` (`r round(100 * passing_missingness / total_after_sex, 2)`%)
+
+```{r missingness-by-status, eval=!is.null(controls)}
+if (!is.null(controls) && "Status" %in% colnames(miss_report)) {
+  miss_fail_summary <- miss_report %>%
+    group_by(Status) %>%
+    summarise(
+      N_Failed = n(),
+      .groups = "drop"
+    )
+  
+  kable(miss_fail_summary, caption = "Missingness Failures by Case/Control Status")
+}
+```
+
+## Missingness Distribution
+
+**WARNING**: If a large proportion of cases are failing, check the distribution below. The threshold may be too stringent or there may be a data quality issue.
+
+```{r missingness-distribution, fig.height=5}
+# Load aggregated missingness to see all samples
+agg_miss <- read.table(
+  file.path(DATA_DIR, "plink", paste0(PROJECT, ".aggregated_missingness.txt")),
+  header = TRUE, stringsAsFactors = FALSE, comment.char = ""
+)
+
+# Add status
+if (!is.null(controls) && length(controls) > 0) {
+  agg_miss$Status <- ifelse(trimws(agg_miss[,1]) %in% controls, "Control", "Case")
+} else {
+  agg_miss$Status <- "Unknown"
+}
+
+ggplot(agg_miss, aes(x = F_MISS, fill = Status)) +
+  geom_histogram(bins = 50, alpha = 0.7) +
+  geom_vline(xintercept = MIND_THR, linetype = "dashed", color = "red", linewidth = 1) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(
+    title = "Distribution of Sample Missingness",
+    x = "Missingness Rate",
+    y = "Count",
+    fill = "Status",
+    caption = paste0("Red line = ", MIND_THR * 100, "% threshold")
+  ) +
+  theme_minimal()
+```
+
+```{r missingness-stats}
+# Summary statistics
+miss_stats <- agg_miss %>%
+  group_by(Status) %>%
+  summarise(
+    N = n(),
+    Mean = mean(F_MISS),
+    Median = median(F_MISS),
+    Min = min(F_MISS),
+    Max = max(F_MISS),
+    Above_Threshold = sum(F_MISS > MIND_THR),
+    Pct_Above = round(100 * Above_Threshold / N, 2),
+    .groups = "drop"
+  )
+
+kable(miss_stats, 
+      digits = 4,
+      caption = "Missingness Statistics by Case/Control Status")
+```
+
+### Failing Samples Details
+
+```{r failing-samples-distribution}
+# Show distribution of failing samples
+failing_samples <- agg_miss %>%
+  filter(F_MISS > MIND_THR) %>%
+  arrange(desc(F_MISS)) %>%
+  mutate(
+    Sample_ID = X.IID,
+    Missingness_Pct = round(F_MISS * 100, 2)
+  )
+
+if (nrow(failing_samples) > 0) {
+  cat(paste0("\n**Total Failing Samples**: ", nrow(failing_samples), "\n\n"))
+  
+  # Distribution plot of failing samples
+  ggplot(failing_samples, aes(x = Missingness_Pct, fill = Status)) +
+    geom_histogram(bins = 30, alpha = 0.7) +
+    labs(
+      title = paste0("Distribution of Missingness Rates for Failing Samples (n=", nrow(failing_samples), ")"),
+      x = "Missingness Rate (%)",
+      y = "Count",
+      fill = "Status"
+    ) +
+    theme_minimal()
+} else {
+  cat("No samples exceeded the missingness threshold.\n")
+}
+```
+
+```{r worst-offenders-table}
+# Show worst 20 offenders
+if (nrow(failing_samples) > 0) {
+  worst_offenders <- failing_samples %>%
+    select(Sample_ID, Status, Missingness_Pct, MISSING_CT, OBS_CT) %>%
+    head(20)
+  
+  kable(worst_offenders, 
+        format.args = list(big.mark = ","),
+        caption = paste0("Top ", min(nrow(failing_samples), 20), " Worst Offenders"))
+}
+```
+
+```{r case-missingness-summary}
+# Specifically summarize case missingness for sharing
+case_miss <- agg_miss %>%
+  filter(Status == "Case") %>%
+  arrange(desc(F_MISS))
+
+if (nrow(case_miss) > 0) {
+  cat("\n### Case Missingness Summary\n\n")
+  cat("- **Total Cases**: ", nrow(case_miss), "\n")
+  cat("- **Cases Failing (>", MIND_THR * 100, "%)**: ", sum(case_miss$F_MISS > MIND_THR), " (", 
+      round(100 * sum(case_miss$F_MISS > MIND_THR) / nrow(case_miss), 2), "%)\n", sep="")
+  cat("- **Mean Missingness**: ", round(mean(case_miss$F_MISS) * 100, 2), "%\n", sep="")
+  cat("- **Median Missingness**: ", round(median(case_miss$F_MISS) * 100, 2), "%\n", sep="")
+  cat("- **Range**: ", round(min(case_miss$F_MISS) * 100, 2), "% - ", 
+      round(max(case_miss$F_MISS) * 100, 2), "%\n\n", sep="")
+}
+```
+
+---
+
+# 5. Heterozygosity
+
+## Method
+
+Heterozygosity rate is calculated for each sample on variants passing all quality filters. Outliers (mean ± 3 SD) are excluded as potential contamination or technical artifacts.
+
+```{r het-summary}
+total_after_miss <- passing_missingness
+failed_het <- nrow(het_report)
+passing_het <- total_after_miss - failed_het
+```
+
+## Results
+
+- **Samples (Post Missingness)**: `r format(total_after_miss, big.mark = ",")`
+- **Failed Heterozygosity**: `r format(failed_het, big.mark = ",")` (`r round(100 * failed_het / total_after_miss, 2)`%)
+- **Passing Heterozygosity**: `r format(passing_het, big.mark = ",")` (`r round(100 * passing_het / total_after_miss, 2)`%)
+
+```{r het-by-status, eval=!is.null(controls)}
+if (!is.null(controls) && "Status" %in% colnames(het_report)) {
+  het_fail_summary <- het_report %>%
+    group_by(Status) %>%
+    summarise(
+      N_Failed = n(),
+      .groups = "drop"
+    )
+  
+  kable(het_fail_summary, caption = "Heterozygosity Failures by Case/Control Status")
+}
+```
+
+---
+
+# 6. Differential Missingness (Case vs Control)
+
+**NOTE**: This is for informational purposes only and does not affect QC filtering.
+
+This tests whether variants have significantly different missingness rates between cases and controls, which could indicate genotyping bias or biological effects.
+
+```{r load-diff-miss}
+# Load differential missingness test results
+diff_miss_files <- paste0("data/plink/", PROJECT, ".chr", 1:22, ".test.missing")
+diff_miss <- lapply(diff_miss_files, function(f) {
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+  } else {
+    NULL
+  }
+}) %>% bind_rows()
+```
+
+```{r diff-miss-summary}
+if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
+  # Count significant variants at different thresholds
+  sig_001 <- sum(diff_miss$P < 0.001, na.rm = TRUE)
+  sig_01 <- sum(diff_miss$P < 0.01, na.rm = TRUE)
+  sig_05 <- sum(diff_miss$P < 0.05, na.rm = TRUE)
+  
+  cat("- **Total variants tested**: ", format(nrow(diff_miss), big.mark = ","), "\n")
+  cat("- **P < 0.05**: ", format(sig_05, big.mark = ","), " (", 
+      round(100 * sig_05 / nrow(diff_miss), 2), "%)\n", sep="")
+  cat("- **P < 0.01**: ", format(sig_01, big.mark = ","), " (", 
+      round(100 * sig_01 / nrow(diff_miss), 2), "%)\n", sep="")
+  cat("- **P < 0.001**: ", format(sig_001, big.mark = ","), " (", 
+      round(100 * sig_001 / nrow(diff_miss), 2), "%)\n", sep="")
+}
+```
+
+```{r diff-miss-plot, fig.height=6}
+if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
+  # Plot missingness rates: cases vs controls
+  ggplot(diff_miss, aes(x = F_MISS_U, y = F_MISS_A)) +
+    geom_point(alpha = 0.1, size = 0.5) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+      title = "Variant Missingness: Cases vs Controls",
+      x = "Missingness in Controls (F_MISS_U)",
+      y = "Missingness in Cases (F_MISS_A)",
+      caption = "Red line = equal missingness | Points above line = higher missingness in cases"
+    ) +
+    theme_minimal()
+}
+```
+
+**Interpretation**: Variants should fall along the diagonal (equal missingness). Points far from the line indicate differential missingness between cases and controls, which may suggest genotyping bias.
+
+
+# 7. Final Sample Count
+
+```{r final-summary}
+final_samples <- passing_het
+final_variants <- variants_after_plink
+
+# Count cases/controls at each stage
+if (!is.null(controls) && length(controls) > 0) {
+  # Starting counts
+  start_cases <- sum(!trimws(sex_report[,1]) %in% controls)
+  start_controls <- sum(trimws(sex_report[,1]) %in% controls)
+  
+  # After sex check
+  postsex_cases <- total_after_sex - sum(trimws(sex_report[,1]) %in% controls)
+  postsex_controls <- sum(trimws(sex_report[,1]) %in% controls)
+  
+  # After missingness (from failing samples)
+  miss_fail_cases <- sum(!trimws(miss_report[,1]) %in% controls)
+  miss_fail_controls <- sum(trimws(miss_report[,1]) %in% controls)
+  postmiss_cases <- postsex_cases - miss_fail_cases
+  postmiss_controls <- postsex_controls - miss_fail_controls
+  
+  # After heterozygosity (from failing samples)
+  het_fail_cases <- sum(!trimws(het_report[,1]) %in% controls)
+  het_fail_controls <- sum(trimws(het_report[,1]) %in% controls)
+  final_cases <- postmiss_cases - het_fail_cases
+  final_controls <- postmiss_controls - het_fail_controls
+}
+```
+
+## Summary
+
+- **Starting Samples**: `r format(total_samples, big.mark = ",")` (`r if(exists("start_cases")) paste0(format(start_cases, big.mark=","), " cases, ", format(start_controls, big.mark=","), " controls")`)
+- **Final Samples**: `r format(final_samples, big.mark = ",")` (`r if(exists("final_cases")) paste0(format(final_cases, big.mark=","), " cases, ", format(final_controls, big.mark=","), " controls")`) 
+- **Total Excluded**: `r format(total_samples - final_samples, big.mark = ",")` (`r if(exists("start_cases")) paste0(format(start_cases - final_cases, big.mark=","), " cases, ", format(start_controls - final_controls, big.mark=","), " controls")`)
+
+### Samples Excluded by Stage
+
+```{r exclusion-by-stage}
+if (exists("start_cases")) {
+  exclusion_breakdown <- data.frame(
+    Stage = c("Sex Check", "Missingness", "Heterozygosity"),
+    Cases_Excluded = c(start_cases - postsex_cases, miss_fail_cases, het_fail_cases),
+    Controls_Excluded = c(start_controls - postsex_controls, miss_fail_controls, het_fail_controls)
+  ) %>%
+    mutate(
+      Total_Excluded = Cases_Excluded + Controls_Excluded,
+      Pct_Cases = round(100 * Cases_Excluded / Total_Excluded, 1)
+    )
+  
+  kable(exclusion_breakdown, 
+        caption = "Sample Exclusions by QC Stage and Case/Control Status",
+        col.names = c("QC Stage", "Cases Excluded", "Controls Excluded", "Total Excluded", "% Cases"))
+}
+```
+
+- **Starting Variants**: `r format(prefilter_total, big.mark = ",")`
+- **Final Variants**: `r format(final_variants, big.mark = ",")` (`r round(100 * final_variants / prefilter_total, 2)`% retention)
+- **Total Excluded**: `r format(prefilter_total - final_variants, big.mark = ",")`
+
+```{r exclusion-cascade}
+exclusion_data <- data.frame(
+  Stage = c("Starting", "Sex Check", "Missingness", "Heterozygosity", "Final"),
+  Samples = c(total_samples, passing_samples, passing_missingness, passing_het, final_samples)
+)
+
+ggplot(exclusion_data, aes(x = factor(Stage, levels = Stage), y = Samples)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = format(Samples, big.mark = ",")), vjust = -0.5) +
+  labs(
+    title = "Sample Retention Through QC Pipeline",
+    x = "QC Stage",
+    y = "Number of Samples"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+---
+
+# 8. Population Structure (PCA)
+
+## Principal Components
+
+```{r pca-summary}
+# Calculate variance explained
+eigenval_file <- file.path(DATA_DIR, "preprocess", paste0(PROJECT, ".build.eigenval"))
+if (!file.exists(eigenval_file)) stop(paste("Required file not found:", eigenval_file))
+eigenval <- read.table(eigenval_file, header = FALSE)
+colnames(eigenval) <- "Eigenvalue"
+eigenval$PC <- paste0("PC", seq_len(nrow(eigenval)))
+eigenval$Variance_Explained <- 100 * eigenval$Eigenvalue / sum(eigenval$Eigenvalue)
+```
+
+### Variance Explained
+
+```{r variance-explained, fig.height=5}
+ggplot(eigenval[1:10, ], aes(x = factor(PC, levels = PC), y = Variance_Explained)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = sprintf("%.2f%%", Variance_Explained)), vjust = -0.5) +
+  labs(
+    title = "Variance Explained by Principal Components",
+    x = "Principal Component",
+    y = "Variance Explained (%)"
+  ) +
+  theme_minimal()
+```
+
+### PC1 vs PC2
+
+```{r pca-plot-pc1-pc2, fig.height=6}
+ggplot(pca, aes(x = PC1, y = PC2, color = Status)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "Principal Component Analysis (PC1 vs PC2)",
+    x = paste0("PC1 (", round(eigenval$Variance_Explained[1], 2), "%)"),
+    y = paste0("PC2 (", round(eigenval$Variance_Explained[2], 2), "%)"),
+    color = "Status"
+  ) +
+  theme_minimal()
+```
+
+### PC3 vs PC4
+
+```{r pca-plot-pc3-pc4, fig.height=6}
+ggplot(pca, aes(x = PC3, y = PC4, color = Status)) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "Principal Component Analysis (PC3 vs PC4)",
+    x = paste0("PC3 (", round(eigenval$Variance_Explained[3], 2), "%)"),
+    y = paste0("PC4 (", round(eigenval$Variance_Explained[4], 2), "%)"),
+    color = "Status"
+  ) +
+  theme_minimal()
+```
+
+### Scree Plot (All 20 PCs)
+
+```{r scree-plot, fig.height=5}
+ggplot(eigenval, aes(x = seq_len(nrow(eigenval)), y = Eigenvalue)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    title = "Scree Plot: Eigenvalues of Principal Components",
+    x = "Principal Component",
+    y = "Eigenvalue"
+  ) +
+  theme_minimal()
+```
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

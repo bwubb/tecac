@@ -1,0 +1,362 @@
+---
+title: "Variant QC Report"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    theme: flatly
+params:
+  project_name: "PROJECT"
+  date: !r format(Sys.Date(), "%Y%m%d")
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE, fig.width=10, fig.height=6)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+project <- params$project_name
+```
+
+# Quality Control Summary
+
+**Project:** `r project`  
+**Date:** `r params$date`
+
+## Overview
+
+This report documents the quality control steps applied to exome sequencing data prior to association analysis. QC was performed on individual chromosome files (chr1-22, chrX) with sequential filtering steps.
+
+---
+
+# Sex Check (Chromosome X)
+
+Sex discordance can indicate sample mix-ups or contamination. For this male-only study, only samples with confirmed male genetic sex are retained.
+
+```{r sex_check}
+sexcheck_file <- paste0("data/qc/temp/", project, ".chrX.sexcheck")
+sex_exclusions_file <- paste0("data/qc/exclusions/", project, ".sexcheck_fail.txt")
+sex_info_file <- paste0("data/qc/", project, ".sex_info.txt")
+
+if(file.exists(sexcheck_file)) {
+  sexcheck <- read_table(sexcheck_file, col_types=cols())
+  
+  sexcheck <- sexcheck %>%
+    mutate(
+      Genetic_Sex=case_when(
+        PEDSEX==1 ~ "Male",
+        PEDSEX==2 ~ "Female",
+        TRUE ~ "Unknown"
+      ),
+      Status=case_when(
+        STATUS=="OK" & PEDSEX==1 ~ "Pass",
+        STATUS=="PROBLEM" ~ "Problem",
+        PEDSEX==2 ~ "Female",
+        TRUE ~ "Fail"
+      )
+    )
+  
+  sex_summary <- sexcheck %>%
+    count(Status) %>%
+    mutate(Percentage=paste0(round(n/sum(n)*100,2),"%"))
+  
+  kable(sex_summary, format="html", caption="Sex Check Results (Male-Only Study)") %>%
+    kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+  
+  failed_count <- sum(sexcheck$Status=="Fail")
+  problem_count <- sum(sexcheck$Status=="Problem")
+  female_count <- sum(sexcheck$Status=="Female")
+  
+  cat("\n\n**Sex Check Summary:**\n")
+  cat("- Sex check problems:", problem_count, "\n")
+  cat("- Females detected:", female_count, "\n")
+  cat("- Other failures:", failed_count, "\n")
+  cat("- Total excluded:", problem_count + female_count + failed_count, "\n\n")
+  
+  if(female_count > 0) {
+    cat("**WARNING: Females detected in male-only study. Review exclusion list.**\n\n")
+  }
+  
+  passing_samples <- sexcheck %>%
+    filter(Status=="Pass") %>%
+    select(`#FID`, IID) %>%
+    mutate(SEX="M")
+  
+  write.table(passing_samples, sex_info_file, quote=FALSE, row.names=FALSE, col.names=TRUE, sep="\t")
+  cat("**Sex info file created:**", sex_info_file, "\n")
+  cat("**Passing samples:**", nrow(passing_samples), "\n\n")
+  
+} else {
+  cat("Sex check file not found.\n")
+}
+```
+
+---
+
+# Variant-Level QC (Per Chromosome)
+
+After applying sex check exclusions and bcftools filters (NoHQHet, PASS only), variants were filtered based on:
+
+- **Missingness:** GENO > 5%
+- **Minor Allele Frequency:** MAF < 1%
+- **Hardy-Weinberg Equilibrium:** HWE p < 1e-6
+
+```{r variant_qc}
+# Read variant filtering logs
+chr_list <- 1:22
+variant_stats <- data.frame()
+
+for(chr in chr_list) {
+  log_file <- paste0("data/qc/temp/", project, ".chr", chr, ".variants_filtered.log")
+  
+  if(file.exists(log_file)) {
+    log_lines <- readLines(log_file)
+    
+    variants_before <- log_lines[grep("variants loaded", log_lines)]
+    variants_after <- log_lines[grep("variants remaining", log_lines)]
+    
+    if(length(variants_before) > 0 && length(variants_after) > 0) {
+      before <- as.numeric(str_extract(variants_before, "[0-9]+"))
+      after <- as.numeric(str_extract(variants_after, "[0-9]+"))
+      removed <- before - after
+      
+      variant_stats <- rbind(variant_stats, data.frame(
+        Chromosome=paste0("chr",chr),
+        Variants_Before=before,
+        Variants_After=after,
+        Variants_Removed=removed,
+        Percent_Removed=round(removed/before*100,2)
+      ))
+    }
+  }
+}
+
+if(nrow(variant_stats) > 0) {
+  kable(variant_stats, format="html", caption="Variant Filtering Results by Chromosome") %>%
+    kable_styling(bootstrap_options=c("striped","hover","condensed"))
+  
+  total_before <- sum(variant_stats$Variants_Before)
+  total_after <- sum(variant_stats$Variants_After)
+  total_removed <- sum(variant_stats$Variants_Removed)
+  
+  cat("\n\n**Total variants across chr1-22:**\n\n")
+  cat("- Before filtering:", format(total_before, big.mark=","), "\n")
+  cat("- After filtering:", format(total_after, big.mark=","), "\n")
+  cat("- Removed:", format(total_removed, big.mark=","), "(", round(total_removed/total_before*100,2), "%)\n\n")
+} else {
+  cat("No variant filtering logs found.\n")
+}
+```
+
+---
+
+# Sample-Level QC
+
+## Sample Missingness (Chr1-22)
+
+Samples with high missingness rates indicate poor sequencing quality or technical failures.
+
+```{r sample_missingness}
+miss_report_file <- paste0("data/qc/reports/", project, ".missingness_report.txt")
+miss_exclusions_file <- paste0("data/qc/exclusions/", project, ".high_missingness.txt")
+
+if(file.exists(miss_report_file)) {
+  cat(readLines(miss_report_file), sep="\n")
+  cat("\n\n")
+}
+
+if(file.exists(miss_exclusions_file)) {
+  miss_exclusions <- read_table(miss_exclusions_file, col_names=c("FID","IID"), col_types=cols())
+  n_excluded <- nrow(miss_exclusions)
+  cat("**Samples excluded due to high missingness (MIND > 2%):**", n_excluded, "\n\n")
+} else {
+  cat("No samples excluded due to high missingness.\n\n")
+}
+```
+
+## Heterozygosity (Chr1-22)
+
+Extreme heterozygosity rates can indicate contamination or inbreeding.
+
+```{r heterozygosity}
+het_exclusions_file <- paste0("data/qc/exclusions/", project, ".het_outliers.txt")
+
+if(file.exists(het_exclusions_file)) {
+  het_exclusions <- read_table(het_exclusions_file, col_names=c("FID","IID"), col_types=cols())
+  n_excluded <- nrow(het_exclusions)
+  cat("**Samples excluded due to heterozygosity outliers (±3 SD):**", n_excluded, "\n\n")
+} else {
+  cat("No samples excluded due to heterozygosity outliers.\n\n")
+}
+
+het_agg_file <- paste0("data/qc/temp/", project, ".aggregated_het.txt")
+if(file.exists(het_agg_file)) {
+  het_data <- read_table(het_agg_file, col_types=cols())
+  
+  if(nrow(het_data) > 0 && "Fhat" %in% colnames(het_data)) {
+    ggplot(het_data, aes(x=Fhat)) +
+      geom_histogram(bins=50, fill="steelblue", color="black", alpha=0.7) +
+      geom_vline(xintercept=mean(het_data$Fhat, na.rm=TRUE), color="red", linetype="dashed", size=1) +
+      geom_vline(xintercept=mean(het_data$Fhat, na.rm=TRUE) + 3*sd(het_data$Fhat, na.rm=TRUE), color="orange", linetype="dotted") +
+      geom_vline(xintercept=mean(het_data$Fhat, na.rm=TRUE) - 3*sd(het_data$Fhat, na.rm=TRUE), color="orange", linetype="dotted") +
+      labs(title="Distribution of Sample Heterozygosity (Fhat)", x="Fhat", y="Count") +
+      theme_minimal()
+  }
+}
+```
+
+---
+
+# Principal Component Analysis
+
+PCA on merged autosomal chromosomes (chr1-22) after all sample exclusions.
+
+## PCA Plots
+
+```{r pca}
+pca_file <- paste0("data/plink/", project, ".pca.eigenvec")
+site_file <- "sites.txt"
+pca_outliers_file <- paste0("data/qc/exclusions/", project, ".pca_outliers.txt")
+
+if(file.exists(pca_file)) {
+  pca_data <- read_table(pca_file, col_types=cols())
+  
+  pca_data <- pca_data %>%
+    mutate(
+      PC_dist=sqrt(PC1^2+PC2^2+PC3^2+PC4^2),
+      mean_dist=mean(PC_dist, na.rm=TRUE),
+      sd_dist=sd(PC_dist, na.rm=TRUE),
+      z_score=(PC_dist-mean_dist)/sd_dist,
+      Outlier=abs(z_score)>6
+    )
+  
+  if(file.exists(site_file)) {
+    site_data <- read_table(site_file, col_types=cols())
+    pca_data <- pca_data %>%
+      left_join(site_data, by=c("#FID"="FID","IID"="IID"))
+    
+    if("SITE" %in% colnames(pca_data)) {
+      ggplot(pca_data, aes(x=PC1, y=PC2, color=SITE, shape=Outlier)) +
+        geom_point(alpha=0.6, size=2) +
+        scale_shape_manual(values=c("FALSE"=16,"TRUE"=4)) +
+        labs(title="Principal Component Analysis (PC1 vs PC2)", x="PC1", y="PC2") +
+        theme_minimal() +
+        theme(legend.position="right")
+      
+      ggplot(pca_data, aes(x=PC3, y=PC4, color=SITE, shape=Outlier)) +
+        geom_point(alpha=0.6, size=2) +
+        scale_shape_manual(values=c("FALSE"=16,"TRUE"=4)) +
+        labs(title="Principal Component Analysis (PC3 vs PC4)", x="PC3", y="PC4") +
+        theme_minimal() +
+        theme(legend.position="right")
+      
+      site_summary <- pca_data %>%
+        count(SITE) %>%
+        arrange(desc(n))
+      
+      kable(site_summary, format="html", caption="Sample Counts by Site") %>%
+        kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+      
+    } else {
+      cat("SITE column not found in sites.txt file.\n")
+    }
+  } else {
+    cat("sites.txt file not found. Plotting without site information.\n\n")
+    
+    ggplot(pca_data, aes(x=PC1, y=PC2, color=Outlier)) +
+      geom_point(alpha=0.6, size=2) +
+      scale_color_manual(values=c("FALSE"="steelblue","TRUE"="red")) +
+      labs(title="Principal Component Analysis (PC1 vs PC2)", subtitle="Outliers identified as |z| > 6 SD from centroid", x="PC1", y="PC2") +
+      theme_minimal()
+    
+    ggplot(pca_data, aes(x=PC3, y=PC4, color=Outlier)) +
+      geom_point(alpha=0.6, size=2) +
+      scale_color_manual(values=c("FALSE"="steelblue","TRUE"="red")) +
+      labs(title="Principal Component Analysis (PC3 vs PC4)", subtitle="Outliers identified as |z| > 6 SD from centroid", x="PC3", y="PC4") +
+      theme_minimal()
+  }
+  
+  outliers <- pca_data %>% filter(Outlier)
+  n_outliers <- nrow(outliers)
+  
+  cat("\n\n**PCA Outlier Detection:**\n")
+  cat("- Distance threshold: |z-score| > 6 SD from centroid (PC1-4)\n")
+  cat("- Mean distance:", round(mean(pca_data$PC_dist, na.rm=TRUE), 3), "\n")
+  cat("- SD distance:", round(sd(pca_data$PC_dist, na.rm=TRUE), 3), "\n")
+  cat("- Outliers detected:", n_outliers, "\n\n")
+  
+  if(n_outliers>0) {
+    outliers %>%
+      select(`#FID`, IID) %>%
+      write.table(pca_outliers_file, quote=FALSE, row.names=FALSE, col.names=FALSE, sep=" ")
+    
+    cat("**PCA outlier exclusion list created:**", pca_outliers_file, "\n\n")
+    
+    outliers_summary <- outliers %>%
+      select(`#FID`, IID, PC1, PC2, PC3, PC4, PC_dist, z_score) %>%
+      arrange(desc(abs(z_score)))
+    
+    kable(outliers_summary, format="html", caption="PCA Outliers (|z| > 6)", digits=3) %>%
+      kable_styling(bootstrap_options=c("striped","hover","condensed"))
+  } else {
+    cat("No PCA outliers detected.\n\n")
+  }
+  
+} else {
+  cat("PCA file not found.\n")
+}
+```
+
+---
+
+# Final Sample Count
+
+```{r final_count}
+final_bcf <- paste0("data/qc/", project, ".chr1.qc.bcf")
+
+if(file.exists(sexcheck_file)) {
+  initial_samples <- nrow(read_table(sexcheck_file, col_types=cols()))
+  
+  sex_fail <- 0
+  if(file.exists(sex_exclusions_file)) {
+    sex_fail <- nrow(read_table(sex_exclusions_file, col_names=FALSE, col_types=cols()))
+  }
+  
+  miss_fail <- 0
+  if(file.exists(miss_exclusions_file)) {
+    miss_fail <- nrow(read_table(miss_exclusions_file, col_names=FALSE, col_types=cols()))
+  }
+  
+  het_fail <- 0
+  if(file.exists(het_exclusions_file)) {
+    het_fail <- nrow(read_table(het_exclusions_file, col_names=FALSE, col_types=cols()))
+  }
+  
+  pca_fail <- 0
+  if(file.exists(pca_outliers_file)) {
+    pca_fail <- nrow(read_table(pca_outliers_file, col_names=FALSE, col_types=cols()))
+  }
+  
+  final_samples <- initial_samples - sex_fail - miss_fail - het_fail - pca_fail
+  
+  summary_df <- data.frame(
+    Step=c("Initial Samples", "Sex Check Failures", "High Missingness", "Heterozygosity Outliers", "PCA Outliers", "Final Sample Count"),
+    Count=c(initial_samples, -sex_fail, -miss_fail, -het_fail, -pca_fail, final_samples)
+  )
+  
+  kable(summary_df, format="html", caption="Sample QC Summary") %>%
+    kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+}
+```
+
+---
+
+# Session Info
+
+```{r session_info}
+sessionInfo()
+```
+

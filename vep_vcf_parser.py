@@ -4,7 +4,6 @@ import csv
 import argparse
 from collections import defaultdict
 import re
-from typing import Dict, List, Optional, Tuple, Any
 
 GT_MAPPING={'0/0':'HOM_REF','0/1':'HET_ALT','1/0':'HET_ALT','1/1':'HOM_ALT'}
 ZYG_MAPPING={'0;0':'HOM_REF','0;1':'HET_ALT','1;0':'HET_ALT','1;1':'HOM_ALT'}

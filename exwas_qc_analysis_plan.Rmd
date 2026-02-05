@@ -1,0 +1,568 @@
+---
+title: "Exome-Wide Association Study Quality Control Analysis Plan"
+author: "TECAC Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup,include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,warning=FALSE,message=FALSE)
+library(knitr)
+library(kableExtra)
+library(DiagrammeR)
+```
+
+# Overview
+
+## Study Design
+
+This document outlines the quality control procedures for exome-wide association study data derived from whole exome sequencing. Quality control is applied to variant calls produced by GLnexus joint calling pipeline prior to association testing with REGENIE. Methods are adapted from Truong et al. (2022) with modifications for exome sequencing data.
+
+## QC Workflow Overview
+
+```{r qc_flowchart,fig.width=9,fig.height=11}
+grViz("
+digraph qc_workflow {
+  graph [rankdir=TB,fontname=Helvetica]
+  node [shape=box,style='rounded,filled',fontname=Helvetica,fontsize=10]
+  edge [fontname=Helvetica,fontsize=9]
+  
+  input [label='Input BCF Files\nPer chromosome (chr1-22, chrX)',fillcolor='#E8F4F8',shape=folder]
+  goldilocks [label='Goldilocks Filtering\n(Applied by DNAnexus/GLnexus)\nDP≥7, GQ≥20, AB filters',fillcolor='#FFF4E6']
+  
+  sex_convert [label='Step 1a: Convert chrX to PLINK',fillcolor='#E8F4F8']
+  sex_check [label='Step 1b: Sex Check\nPLINK2 --check-sex on chrX',fillcolor='#D4EDDA']
+  sex_exclude [label='Sex Check Failures',fillcolor='#F8D7DA',shape=note]
+  
+  bcf_filter [label='Step 2: BCFtools Filter\nExclude sex check failures\nNoHQHet filter\nPASS variants only',fillcolor='#D4EDDA']
+  bcf_stats [label='Variant Counts\nSNP/INDEL pre/post',fillcolor='#E8F4F8',shape=note]
+  
+  plink_convert [label='Step 3: Convert to PLINK2\nPer chromosome pgen format',fillcolor='#E8F4F8']
+  
+  var_qc [label='Step 4: Variant-Level QC\n--geno 0.05 (missingness)\n--maf 0.01 (frequency)\n--hwe 1e-6 midp (equilibrium)',fillcolor='#D4EDDA']
+  
+  miss_calc [label='Step 5: Sample Missingness\nAggregate across chr1-22\nF_MISS threshold: 0.01',fillcolor='#D4EDDA']
+  miss_exclude [label='High Missingness Samples',fillcolor='#F8D7DA',shape=note]
+  
+  het_calc [label='Step 6: Heterozygosity\nCalculate per chromosome\nAggregate chr1-22\n|Fhat|>3 SD threshold',fillcolor='#D4EDDA']
+  het_exclude [label='Heterozygosity Outliers',fillcolor='#F8D7DA',shape=note]
+  
+  merge [label='Step 7: Merge Chromosomes\nExclude: high missingness, het outliers',fillcolor='#E8F4F8']
+  pca [label='Step 8: PCA\n20 components, approx method\nFor covariates and visual QC',fillcolor='#D4EDDA']
+  
+  output [label='QC Outputs\nFiltered variant IDs per chr\nPassing sample list\nPCA eigenvectors',fillcolor='#A8D5BA',shape=folder]
+  
+  input -> goldilocks
+  goldilocks -> sex_convert
+  sex_convert -> sex_check
+  sex_check -> sex_exclude
+  sex_exclude -> bcf_filter
+  goldilocks -> bcf_filter
+  bcf_filter -> bcf_stats
+  bcf_filter -> plink_convert
+  plink_convert -> var_qc
+  var_qc -> miss_calc
+  miss_calc -> miss_exclude
+  miss_calc -> het_calc
+  het_calc -> het_exclude
+  het_calc -> merge
+  miss_exclude -> merge
+  het_exclude -> merge
+  merge -> pca
+  pca -> output
+  
+  subgraph cluster_legend {
+    label='Legend'
+    style=filled
+    fillcolor='#F5F5F5'
+    
+    leg_input [label='Data Files',fillcolor='#E8F4F8',shape=folder]
+    leg_upstream [label='Upstream Filter',fillcolor='#FFF4E6']
+    leg_process [label='QC Step',fillcolor='#D4EDDA']
+    leg_exclude [label='Exclusion List',fillcolor='#F8D7DA',shape=note]
+    leg_result [label='Final Output',fillcolor='#A8D5BA',shape=folder]
+  }
+}")
+```
+
+## ExWAS vs GWAS Quality Control
+
+Key differences between exome sequencing QC and array-based GWAS QC:
+
+- **No imputation step**: Variants are directly called from sequencing reads
+- **Indels included**: Insertion-deletion variants are retained and analyzed
+- **Rare variants expected**: Low minor allele frequency variants are the primary target
+- **Sample preservation priority**: Sequencing data represents substantial investment per sample
+- **Quality from sequencing metrics**: Variant quality derives from read depth and base quality scores rather than imputation quality scores
+
+# Input Data
+
+## File Format and Structure
+
+- **Format**: BCF files per chromosome (chr1-22, chrX)
+- **Source**: GLnexus joint variant calling output
+- **Genotype encoding**: Diploid for autosomes and chrX, haploid for chrY
+- **Coordinate system**: hg38 reference assembly
+
+## Upstream Goldilocks Filtering (DNAnexus/GLnexus)
+
+Goldilocks filtering is applied by DNAnexus to remove low-quality genotype calls before data delivery. The following filters are applied to each sample at each variant:
+
+- **Low depth/quality**: Mask non-reference genotypes with DP < 7 or GQ < 20
+- **Low allele balance (SNP)**: Mask heterozygous SNVs with ALT allele balance < 0.15
+- **Low allele balance (Indel)**: Mask heterozygous indels with ALT allele balance < 0.20
+
+Filtered genotypes are converted to no-calls (./.). Sites where all called genotypes are filtered may be removed during site-level cleanup. These rules correspond to VCF header filters: LowDepth_GQ, LowAlleleBalance_Het, LowAlleleBalance_INDEL, and the unification tag MONOALLELIC.
+
+## Initial Variant Filters
+
+BCFtools filters applied to raw variant calls:
+
+- **Sample-level**: Remove samples failing sex check (chrX-based)
+- **NoHQHet filter**: Remove heterozygous genotypes lacking high-quality evidence
+- **PASS filter**: Retain only variants passing all calling filters
+
+# Quality Control Workflow
+
+## Step 1: Sex Check and Validation
+
+### Objective
+
+Identify samples with discordant genetic sex and reported sex to detect sample swaps or contamination.
+
+### Method
+
+- **Chromosome**: chrX only
+- **Tool**: PLINK2 `--check-sex`
+- **Calculation**: F-statistic based on chrX homozygosity rate
+  - Males: F > 0.8 (mostly hemizygous)
+  - Females: F < 0.2 (heterozygous expected)
+- **Exclusion criteria**: Samples with STATUS=PROBLEM in sex check output
+
+### Outputs
+
+- `{project}.sexcheck.txt`: Full sex check results (FID, IID, PEDSEX, SNPSEX, STATUS, F)
+- `{project}.sexcheck_fail.txt`: List of samples to exclude (FID, IID)
+
+### Application
+
+Sex check failures removed prior to all downstream analyses.
+
+## Step 2: Initial Variant Quality Filtering
+
+### Objective
+
+Remove technically problematic variants before assessing sample quality. This approach prioritizes sample retention by excluding poor-quality variants that would artificially inflate sample missingness rates.
+
+### BCFtools Filtering (per chromosome)
+
+Applied to chr1-22:
+
+- **Sample exclusions**: Remove sex check failures identified in Step 1
+- **NoHQHet**: Exclude heterozygous calls lacking high-quality support
+- **FILTER field**: Include only PASS variants
+
+### Quality Metrics Collection
+
+Pre-filter and post-filter statistics generated using `bcftools stats`:
+
+- Total variant count
+- Transition/transversion ratio
+- Indel/SNP ratio
+- Per-sample depth and missingness distributions
+
+### Variant Type Tracking
+
+Count SNPs, indels, MNPs, and other variant types:
+
+- Pre-BCFtools filtering counts per chromosome
+- Post-BCFtools filtering counts per chromosome
+- Outputs: Space-delimited files with TYPE and COUNT columns
+
+### Outputs
+
+- `data/bcftools/{project}.chr{chr}.qc_filter1.bcf`: Filtered BCF files
+- `data/qc/reports/{project}.chr{chr}.prefilter.stats`: Pre-filter bcftools stats
+- `data/qc/reports/{project}.chr{chr}.postfilter.stats`: Post-filter bcftools stats
+- `data/qc/reports/{project}.chr{chr}.prefilter.variant_types.txt`: Pre-filter variant counts
+- `data/qc/reports/{project}.chr{chr}.postfilter.variant_types.txt`: Post-filter variant counts
+
+## Step 3: Variant-Level Quality Control Filters
+
+### Objective
+
+Apply standard variant-level filters to remove genotyping errors and low-quality variants while preserving rare exonic variants appropriate for burden testing.
+
+### Filters Applied (per chromosome)
+
+Performed on PLINK2 format data (chr1-22):
+
+- **Genotype missingness (--geno)**: Remove variants with call rate < 95%
+  - Threshold: 0.05 (5% missing genotypes allowed)
+  - Rationale: High missingness indicates technical difficulties at locus
+- **Minor allele frequency (--maf)**: Remove variants with MAF < 1%
+  - Threshold: 0.01
+  - Rationale: Balance between rare variant retention and noise reduction
+- **Hardy-Weinberg equilibrium (--hwe)**: Remove variants with HWE p < 1×10⁻⁶
+  - Threshold: 1e-6
+  - Mid-p correction: Applied using `--hwe midp` flag to reduce false positives for rare variants
+  - Rationale: Extreme deviations suggest genotyping errors or structural variants; mid-p adjustment prevents overly conservative filtering of low-frequency alleles
+
+### Quality Metrics Collection
+
+For each chromosome:
+
+- **Missingness**: Per-variant missingness rates (`--missing`)
+- **Frequency**: Allele frequencies and counts (`--freq`)
+- Metrics calculated before and after filtering
+
+### Outputs
+
+- `data/plink/{project}.chr{chr}.qc_filter2.pgen/pvar/psam`: Filtered genotypes
+- `data/plink/{project}.chr{chr}.qc_filter1.vmiss`: Pre-filter variant missingness
+- `data/plink/{project}.chr{chr}.qc_filter1.afreq`: Pre-filter allele frequencies
+
+### Rationale for Per-Chromosome Processing
+
+Variant-level filters can be applied independently per chromosome:
+
+- Each variant's statistics (missingness, MAF, HWE) calculated across all samples
+- Chromosome-level processing improves computational efficiency
+- Results equivalent to whole-genome filtering
+
+## Step 4: Sample Missingness Assessment
+
+### Objective
+
+Identify samples with excessive missing genotypes after removal of low-quality variants. This two-stage approach prevents penalizing samples for poor-quality variants.
+
+### Method
+
+- **Calculation**: Aggregate sample missingness across autosomes (chr1-22 only)
+- **Threshold**: F_MISS > 0.01 (1% missingness, MIND threshold)
+- **Tool**: Python script `aggregate_missingness.py`
+- **Input**: Per-chromosome missingness files from filtered variants
+
+### Sample Selection Criteria
+
+Samples excluded if:
+
+- Missing genotype rate > 1% across filtered autosomal variants
+- Consistent high missingness across multiple chromosomes
+
+### Outputs
+
+- `data/qc/reports/{project}.missingness_report.txt`: Excluded samples with F_MISS values (CSV format: FID,IID,F_MISS)
+- `data/qc/{project}.highmissing_samples.txt`: Sample exclusion list (FID, IID)
+
+### Rationale for Post-Filtering Assessment
+
+Calculating sample missingness after variant filtering:
+
+- Prevents artifacts from poor-quality variants
+- Focuses on true sample quality issues (DNA quality, library preparation)
+- Preserves valuable samples that would be falsely flagged by bad variants
+
+## Step 5: Heterozygosity Outlier Detection
+
+### Objective
+
+Identify samples with abnormal heterozygosity rates indicating sample contamination, DNA degradation, or inbreeding.
+
+### Method
+
+- **Calculation**: Per-chromosome heterozygosity using PLINK2 `--het`
+- **Aggregation**: Combine Fhat estimates across autosomes (chr1-22)
+- **Tool**: Python script `aggregate_heterozygosity.py`
+- **Threshold**: Samples with |Fhat| > 3 standard deviations from mean
+
+### Heterozygosity Interpretation
+
+- **High heterozygosity** (Fhat << 0): Sample contamination or mixture
+- **Low heterozygosity** (Fhat >> 0): Inbreeding, DNA degradation, or poor genotyping
+- **Normal range**: Fhat ≈ 0 for outbred populations
+
+### Outputs
+
+- `data/qc/reports/{project}.heterozygosity_report.txt`: Outlier samples with Fhat values (CSV format: FID,IID,Fhat)
+- `data/qc/{project}.heterozygosity_outliers.txt`: Sample exclusion list (FID, IID)
+
+### Rationale for Post-Filtering Assessment
+
+Heterozygosity calculated on filtered variants:
+
+- Removes noise from poor-quality or rare variants
+- Focuses on common, high-quality variants for accurate estimates
+- Improves outlier detection sensitivity
+
+## Step 6: Genotype Merging for Population Structure Analysis
+
+### Objective
+
+Create merged genotype dataset across autosomes for principal component analysis while excluding identified problematic samples.
+
+### Method
+
+- **Chromosomes**: Autosomes only (chr1-22)
+- **Exclusions applied**:
+  - Sex check failures
+  - High missingness samples
+  - Heterozygosity outliers
+- **Tool**: PLINK2 `--pmerge-list`
+- **Format**: PLINK2 pgen/pvar/psam
+
+### Merged Dataset Characteristics
+
+The merged dataset includes:
+
+- Only variants passing all quality filters
+- Only samples passing all QC steps
+- Autosomal variants for unbiased population structure inference
+- No LD pruning (exome variants not in strong LD)
+
+### Outputs
+
+- `data/plink/{project}.merged_for_pca.pgen/pvar/psam`: Merged genotypes for PCA
+
+### Rationale for No LD Pruning
+
+LD pruning not performed because:
+
+- Exome variants primarily in coding regions with functional constraints
+- Low LD between most exonic variants
+- Rare variants (primary interest) not in LD blocks
+- Computational efficiency with smaller variant sets
+
+## Step 7: Principal Component Analysis
+
+### Objective
+
+Calculate principal components to capture population structure for use as covariates in association testing and visual inspection of sample clustering.
+
+### Method
+
+- **Tool**: PLINK2 `--pca 20 approx`
+- **Components**: 20 principal components
+- **Algorithm**: Approximate PCA for computational efficiency with large sample sizes
+- **Input**: Merged, QC-filtered autosomal variants
+
+### Visual Inspection
+
+PCA results used for exploratory visual inspection:
+
+- Visual inspection of PC1 vs PC2 plots colored by site/batch
+- Identification of potential population stratification or batch effects
+- No formal outlier detection or exclusion criteria applied
+
+### Outputs
+
+- `data/plink/{project}.pca.eigenvec`: Sample eigenvectors (20 PCs)
+- `data/plink/{project}.pca.eigenval`: Eigenvalues (variance explained)
+
+### Application
+
+Principal components used as:
+
+- Covariates in REGENIE association testing (typically PC1-10) to control for population structure
+- Visual quality control to assess population stratification or batch effects
+- No formal outlier exclusion based on PCA
+
+## Step 8: Final Sample and Variant Selection
+
+### Objective
+
+Apply all QC exclusions to generate final analysis-ready BCF files per chromosome.
+
+### Method
+
+- **Input**: BCFtools-filtered BCFs from Step 2
+- **Sample exclusions**: Sex check, high missingness, heterozygosity outliers
+- **Variant extraction**: Extract passing variant IDs from PLINK2 filtered files
+- **Tool**: BCFtools `view` with inclusion lists
+
+### Final Dataset Characteristics
+
+Analysis-ready data includes:
+
+- Variants passing: FILTER=PASS, NoHQHet, geno, maf, hwe filters
+- Samples passing: Sex check, missingness, heterozygosity checks
+- Format: BCF per chromosome (chr1-22)
+- Indels retained throughout pipeline
+
+### Outputs
+
+- `data/qc/{project}.chr{chr}.passing_variants.txt`: Variant ID lists per chromosome
+- Final QC'd BCF files ready for PLINK2 export and REGENIE input
+
+# Quality Control Thresholds
+
+## Summary Table
+
+```{r thresholds}
+thresholds<-data.frame(
+  QC_Step=c(
+    "Sex check",
+    "Variant missingness",
+    "Minor allele frequency",
+    "Hardy-Weinberg equilibrium",
+    "Sample missingness",
+    "Heterozygosity"
+  ),
+  Threshold=c(
+    "STATUS=PROBLEM",
+    "geno > 0.05",
+    "MAF < 0.01",
+    "HWE p < 1e-6",
+    "F_MISS > 0.01",
+    "|Fhat| > 3 SD"
+  ),
+  Applied_To=c(
+    "Samples (chrX)",
+    "Variants (chr1-22)",
+    "Variants (chr1-22)",
+    "Variants (chr1-22)",
+    "Samples (chr1-22)",
+    "Samples (chr1-22)"
+  ),
+  Rationale=c(
+    "Sample swap or contamination",
+    "Technical failure at locus",
+    "Low frequency noise reduction",
+    "Genotyping error or structural variant",
+    "Poor DNA quality or library prep",
+    "Contamination or inbreeding"
+  )
+)
+
+kable(thresholds,format="html") %>%
+  kable_styling(bootstrap_options=c("striped","hover","condensed"),full_width=FALSE) %>%
+  column_spec(1,bold=TRUE,border_right=TRUE) %>%
+  column_spec(4,width="30%")
+```
+
+## Threshold Justification
+
+### Variant-Level Thresholds
+
+- **Genotype missingness (1%)**: Standard threshold balancing variant retention and quality
+- **MAF (1%)**: Appropriate for exome data with burden testing planned; retains rare functional variants
+- **HWE (1×10⁻⁶)**: Conservative threshold focusing on extreme violations indicating errors
+
+### Sample-Level Thresholds
+
+- **Sample missingness (1%)**: Stringent threshold to ensure high-quality samples for rare variant analysis
+- **Heterozygosity (3 SD)**: Moderate threshold capturing clear outliers without over-exclusion
+
+**Note**: PCA is computed for covariates and visual inspection but not used for sample exclusion.
+
+# Sample Preservation Strategy
+
+## Rationale
+
+This QC pipeline prioritizes sample retention based on:
+
+- High per-sample cost of exome sequencing
+- Limited availability of disease cases
+- Rare variant focus requiring maximum sample size
+- Technical quality issues often localized to specific variants, not samples
+
+## Order of Operations
+
+The filter order is designed to preserve samples:
+
+1. **Remove bad variants first**: Prevents penalizing samples for poor-quality variants
+2. **Assess sample quality on clean variants**: True sample issues visible after variant filtering
+3. **Progressive exclusion**: Only clear outliers removed at each step
+
+# Expected Outputs for Reporting
+
+## Per-Chromosome Statistics
+
+For each chromosome (chr1-22):
+
+- Variant counts pre/post filtering (bcftools stats)
+- Variant type breakdown (SNP, INDEL, MNP, OTHER)
+- Variant missingness distributions
+- Allele frequency spectra
+
+## Sample-Level Reports
+
+Aggregated across autosomes:
+
+- Sample exclusion lists with quantitative values:
+  - Sex check failures
+  - High missingness samples with F_MISS
+  - Heterozygosity outliers with Fhat
+- Sample counts at each QC step
+
+## Quality Metrics
+
+Summary statistics for final dataset:
+
+- Total samples retained
+- Total variants retained per chromosome
+- Transition/transversion ratio
+- Indel/SNP ratio
+- Mean sample call rate
+- Mean variant call rate
+
+# Software and Tools
+
+## Primary Tools
+
+- **BCFtools v1.x**: Variant file manipulation and filtering
+- **PLINK2**: Genetic data QC and analysis
+- **Python 3.x**: Custom aggregation scripts with pandas
+- **Snakemake**: Workflow management and reproducibility
+
+## Custom Scripts
+
+- `aggregate_missingness.py`: Combine per-chromosome sample missingness using argparse
+- `aggregate_heterozygosity.py`: Combine per-chromosome heterozygosity using argparse
+
+## Computational Environment
+
+- Cluster execution via SLURM
+- Per-chromosome parallelization
+- Resource allocation specified in cluster configuration
+
+# Quality Control Philosophy
+
+## Key Principles
+
+This QC approach follows established principles:
+
+1. **Transparency**: All thresholds explicitly defined and justified
+2. **Reproducibility**: Pipeline implemented in Snakemake with version control
+3. **Sample preservation**: Filter order designed to retain valuable samples
+4. **ExWAS-specific**: Adapted for sequencing data without imputation
+5. **Documentation**: Comprehensive tracking of exclusions at each step
+6. **Rare variant focus**: Thresholds appropriate for burden testing
+
+## Deviations from Standard GWAS QC
+
+Intentional differences from array-based GWAS protocols:
+
+- No imputation quality filtering (not applicable)
+- No LD pruning before PCA (exome variants not in LD)
+- Lower MAF threshold (rare variants are targets)
+- Indel retention throughout pipeline
+- Variant filtering before sample filtering (sample preservation)
+
+# References
+
+Quality control procedures adapted from:
+
+- Truong VQ, Woerner JA, Cherlin TA, et al. (2022) Quality control procedures for genome-wide association studies. Current Protocols, 2, e603. doi: 10.1002/cpz1.603
+- PLINK2 documentation: https://www.cog-genomics.org/plink/2.0/
+- REGENIE documentation: https://rgcgithub.github.io/regenie/
+
+Specific adaptations for exome-wide association studies based on project requirements and data characteristics.
+

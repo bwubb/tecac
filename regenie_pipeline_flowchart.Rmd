@@ -1,0 +1,88 @@
+---
+title: "REGENIE Exome-Wide Association Pipeline Overview"
+author: "Brad Wubbenhorst"
+output:
+  html_document:
+    theme: paper
+    toc: false
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+library(DiagrammeR)
+```
+
+# REGENIE ExWAS Pipeline Flowchart
+
+```{r regenie_flowchart, echo=FALSE, fig.cap="REGENIE Exome-Wide Association Pipeline"}
+grViz("
+digraph regenie_pipeline {
+
+  # Global settings
+  graph [rankdir = TB, fontsize = 12, fontname = Helvetica]
+  node [fontname = Helvetica, fontsize = 11, shape = box, style = filled, color = DarkBlue]
+
+  # Input nodes
+  input_vcf [label = 'Multi-chromosome VCF\\nfiles', fillcolor = Khaki, fontcolor = Black, shape = folder]
+  samples [label = 'Sample list', fillcolor = Khaki, fontcolor = Black, shape = note]
+  pheno [label = 'Phenotypes', fillcolor = Khaki, fontcolor = Black, shape = note]
+  covar [label = 'Covariates', fillcolor = Khaki, fontcolor = Black, shape = note]
+
+  # Processing nodes
+  preprocess [label = 'VCF Preprocessing\\n(normalize, filter, QC)', fillcolor = LightSkyBlue]
+  pgen_convert [label = 'Convert to PLINK2\\nPGEN format', fillcolor = LightSkyBlue]
+
+  # Step 1 nodes
+  step1_chr1 [label = 'Step 1\\nChr 1\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
+  step1_chr_ellipsis [label = '...', fillcolor = LavenderBlush, shape = parallelogram]
+  step1_chr22 [label = 'Step 1\\nChr 22\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
+
+  merge_step1 [label = 'Merge Step 1\\nresults', fillcolor = MistyRose, shape = diamond]
+
+  # Step 2 nodes
+  step2_single [label = 'Step 2 Single-Variant\\nAssociation Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
+  step2_gene [label = 'Step 2 Gene-Based\\nBurden Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
+
+  # Annotation and output
+  vep_annotate [label = 'VEP Annotation\\n(pathogenic/VUS variants)', fillcolor = LemonChiffon]
+  report_gen [label = 'Generate HTML Report\\n(statistics, plots, tables)', fillcolor = AliceBlue, shape = note]
+
+  # Connections
+  input_vcf -> preprocess
+  samples -> preprocess
+  preprocess -> pgen_convert
+  preprocess -> vep_annotate
+
+  pgen_convert -> step1_chr1
+  pgen_convert -> step1_chr_ellipsis
+  pgen_convert -> step1_chr22
+
+  step1_chr1 -> merge_step1 [style = dotted]
+  step1_chr_ellipsis -> merge_step1 [style = dotted]
+  step1_chr22 -> merge_step1 [style = dotted]
+
+  merge_step1 -> step2_single
+  vep_annotate -> step2_gene
+
+  step2_single -> report_gen
+  step2_gene -> report_gen
+
+  # Invisible edges for layout
+  {rank = same; step1_chr1; step1_chr_ellipsis; step1_chr22}
+  {rank = same; step2_single; step2_gene}
+
+  # Subgraph for parallel processing
+  subgraph cluster_parallel {
+    label = 'Parallel Processing\\n(Chromosome-level)'
+    fontsize = 14
+    style = filled
+    fillcolor = WhiteSmoke
+    step1_chr1
+    step1_chr_ellipsis
+    step1_chr22
+    step2_single
+    step2_gene
+  }
+}
+")
+```

@@ -52,10 +52,11 @@ rule preprocess_vcf:
     output:
         "data/work/preprocess/{PROJECT_NAME}.chr{CHR}.bcf"
     params:
-        samples=config['input']['samples']
+        samples=config['input']['samples'],
+        targets=config['input']['targets']
     shell:
         """
-        bcftools view -r chr{wildcards.CHR} -S {params.samples} {input} |
+        bcftools view -r chr{wildcards.CHR} -S {params.samples} -R {params.targets} {input} |
         bcftools norm -m-both |
         bcftools annotate --set-id '%CHROM\_%POS\_%REF\_%ALT'|
         bcftools +fill-tags -- -t VAF,AC,AC_Het,AC_Hom,AC_Hemi,AF,AN,NS,MAF,ExcHet,F_MISSING,HWE |
@@ -83,6 +84,55 @@ rule vcf_filter:
 #    'haploid'/'h': Treat half-calls as haploid/homozygous (the PLINK 1 file format does not distinguish between the two). This maximizes similarity between the VCF and BCF2 parsers.
 #    'missing'/'m': Treat half-calls as missing.
 #    'reference'/'r': Treat the missing part as reference.
+
+rule no_sample_vcf:
+    input:
+        "data/work/preprocess/{PROJECT_NAME}.chr{CHR}.qc.bcf"
+    output:
+        "data/work/preprocess/{PROJECT_NAME}.chr{CHR}.qc.no_sample.vcf"
+    shell:
+        "bcftools view -G -Ov -o {output} {input}"
+
+rule annotate_variants:
+    input:
+       "data/work/preprocess/{PROJECT_NAME}.chr{CHR}.qc.no_sample.vcf"
+    output:
+        "data/work/preprocess/{PROJECT_NAME}.chr{CHR}.qc.no_sample.vep.vcf"
+    shell:
+        """
+        singularity run -H $PWD:/home \
+        --bind /home/bwubb/resources:/opt/vep/resources \
+        --bind /home/bwubb/.vep:/opt/vep/.vep \
+        /appl/containers/vep112.sif vep \
+        --dir /opt/vep/.vep \
+        -i {input} \
+        -o {output} \
+        --force_overwrite \
+        --offline \
+        --cache \
+        --format vcf \
+        --vcf --everything --canonical \
+        --assembly GRCh38 \
+        --species homo_sapiens \
+        --fasta /opt/vep/resources/Genomes/Human/hg38/fa/Homo_sapiens_assembly38.fasta \
+        --vcf_info_field ANN \
+        --plugin NMD \
+        --plugin REVEL,/opt/vep/.vep/revel/revel_grch38.tsv.gz \
+        --plugin SpliceAI,snv=/opt/vep/.vep/spliceai/spliceai_scores.raw.snv.hg38.vcf.gz,indel=/opt/vep/.vep/spliceai/spliceai_scores.raw.indel.hg38.vcf.gz \
+        --plugin gnomADc,/opt/vep/.vep/gnomAD/gnomad.v3.1.1.hg38.genomes.gz \
+        --plugin UTRAnnotator,/opt/vep/.vep/Plugins/UTRannotator/uORF_5UTR_GRCh38_PUBLIC.txt \
+        --custom /opt/vep/.vep/clinvar/vcf_GRCh38/clinvar.autogvp.vcf.gz,ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN,AutoGVP \
+        --plugin AlphaMissense,file=/opt/vep/.vep/alphamissense/AlphaMissense_GRCh38.tsv.gz \
+        --plugin MaveDB,file=/opt/vep/.vep/mavedb/MaveDB_variants.tsv.gz
+        """
+
+rule parse_vep:
+    input:
+        "data/work/preprocess/{PROJECT_NAME}.chr{CHR}.qc.no_sample.vep.vcf"
+    output:
+        "data/work/preprocess/{PROJECT_NAME}.chr{CHR}.qc.no_sample.vep.report.csv"
+    shell:
+        "python vep_vcf_parser.py -i {input} -o {output} -m no_sample"
 
 rule chr_pgen:
     input:
@@ -118,8 +168,8 @@ rule merge_chr_pgen:
     shell:
         """
         rm -f file_list.txt
-        for chrom in {{2..22}}; do echo \"data/work/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.regenie_step1.pgen data/work/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.regenie_step1.pvar data/work/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.regenie_step1.psam\" >> file_list.txt; done
-        plink2 --pfile data/work/preprocess/{wildcards.PROJECT_NAME}.chr1.regenie_step1 --double-id --pmerge-list file_list.txt --make-pgen --out {params.out}
+        for chrom in {{2..22}}; do echo \"data/work/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.qc.regenie_step1.pgen data/work/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.qc.regenie_step1.pvar data/work/preprocess/{wildcards.PROJECT_NAME}.chr${{chrom}}.qc.regenie_step1.psam\" >> file_list.txt; done
+        plink2 --pfile data/work/preprocess/{wildcards.PROJECT_NAME}.chr1.qc.regenie_step1 --double-id --pmerge-list file_list.txt --make-pgen --out {params.out}
         """
         #--pca
 
@@ -135,12 +185,17 @@ rule merge_chr_snplist:
                     f.write(f2.read())
 
 rule create_vep_list:
+    input:
+        expand("data/work/preprocess/{PROJECT_NAME}.chr{CHR}.qc.no_sample.vep.report.csv",PROJECT_NAME=PROJECT,CHR=CHROMOSOMES)
     output:
         "vep_files.list"
     run:
         with open(output[0],'w') as f:
-            for i in config['input']['vep_csv']:
-                f.write(i+'\n')
+            for chr in CHROMOSOMES:
+                vep_file=f"data/work/preprocess/{PROJECT}.chr{chr}.qc.no_sample.vep.report.csv"
+                #print(vep_file)
+                if os.path.exists(vep_file):
+                    f.write(vep_file+'\n')
 
 rule preprocess_regenie:
     input:
@@ -211,7 +266,7 @@ rule step2_single_variant_aux:
 
         while IFS= read -r vep_file; do
             if [ -f "$vep_file" ]; then
-                awk -F',' '($9 == "\"1\"" || $9 == "\"2\"") {print $6","$7","$9","$13","$14}' "$vep_file" >> {output}
+                awk -F',' '($9 == "\\"1\\"" || $9 == "\\"2\\"") {{print $6 "," $7 "," $9 "," $13 "," $14}}' "$vep_file" >> {output}
             fi
         done < {input}
         """
