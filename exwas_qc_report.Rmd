@@ -11,8 +11,8 @@ output:
     code_folding: hide
 params:
   project: "PROJECT"
-  controls_file: "controls.txt"
   data_dir: "data"
+  covariate_file: ""   # single file WITH HEADER: FID, IID, Status, Freeze (Regnie + report + pipeline)
 ---
 
 ```{r setup, include=FALSE}
@@ -26,8 +26,9 @@ config <- read_yaml("config.yml")
 
 # Project settings (params override config, for snakemake compatibility)
 PROJECT <- if (!is.null(params$project)) params$project else config$project$name
-CONTROLS_FILE <- if (!is.null(params$controls_file)) params$controls_file else config$input$controls
 DATA_DIR <- if (!is.null(params$data_dir)) params$data_dir else "data"
+COVARIATE_FILE <- if (!is.null(params$covariate_file) && params$covariate_file != "") params$covariate_file else tryCatch(config$input$covariates, error = function(e) NULL)
+if (is.null(COVARIATE_FILE) || length(COVARIATE_FILE) == 0) COVARIATE_FILE <- ""
 
 # QC thresholds - always from config
 MIND_THR <- as.numeric(config$qc$mind_thr)
@@ -53,38 +54,32 @@ This report summarizes quality control performed on whole exome sequencing data 
 
 # Load Data
 
-```{r load-data}
-# Load controls file and create phenotype status
-if (file.exists(CONTROLS_FILE)) {
-  controls <- trimws(read.table(CONTROLS_FILE, header = FALSE, stringsAsFactors = FALSE, colClasses = "character")[[1]])
-} else {
-  warning(paste("Controls file not found:", CONTROLS_FILE))
-  controls <- character(0)
-}
+One **covariate file** (with header) supplies Status and Freeze for all QC views and for the pipeline: set `config: input: covariates: path/to/covariates.txt`.
 
+```{r load-data}
 # Load sex inference results
-sex_file <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".sex_inference.txt"))
+sex_file <- file.path(DATA_DIR, "qc/reports", "sex_inference.txt")
 if (!file.exists(sex_file)) stop(paste("Required file not found:", sex_file))
 sex_report <- read.table(sex_file, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
 
 # Load missingness report
-miss_file <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".missingness_report.txt"))
+miss_file <- file.path(DATA_DIR, "qc/reports", "missingness_report.txt")
 if (!file.exists(miss_file)) stop(paste("Required file not found:", miss_file))
 miss_report <- read.csv(miss_file, stringsAsFactors = FALSE)
 
 # Load heterozygosity report
-het_file <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".heterozygosity_report.txt"))
+het_file <- file.path(DATA_DIR, "qc/reports", "heterozygosity_report.txt")
 if (!file.exists(het_file)) stop(paste("Required file not found:", het_file))
 het_report <- read.csv(het_file, stringsAsFactors = FALSE)
 
 # Load PCA results
-pca_file <- file.path(DATA_DIR, "preprocess", paste0(PROJECT, ".build.eigenvec"))
+pca_file <- file.path(DATA_DIR, "preprocess", "build.eigenvec")
 if (!file.exists(pca_file)) stop(paste("Required file not found:", pca_file))
 pca <- read.table(pca_file, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
 
 # Load variant type counts (prefilter)
 prefilter_counts <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".prefilter.variant_types.txt"))
+  f <- file.path(DATA_DIR, "qc/reports", paste0("chr", chr, ".prefilter.variant_types.txt"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
       mutate(CHR = chr)
@@ -96,7 +91,7 @@ prefilter_counts <- lapply(1:22, function(chr) {
 
 # Load variant type counts (postfilter)
 postfilter_counts <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".postfilter.variant_types.txt"))
+  f <- file.path(DATA_DIR, "qc/reports", paste0("chr", chr, ".postfilter.variant_types.txt"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
       mutate(CHR = chr)
@@ -108,7 +103,7 @@ postfilter_counts <- lapply(1:22, function(chr) {
 
 # Load variant counts after plink filtering
 postplink_counts <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".postplink.variant_count.txt"))
+  f <- file.path(DATA_DIR, "qc/reports", paste0("chr", chr, ".postplink.variant_count.txt"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
   } else {
@@ -119,7 +114,7 @@ postplink_counts <- lapply(1:22, function(chr) {
 
 # Load plink filter metrics
 plink_filter_metrics <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "qc/reports", paste0(PROJECT, ".chr", chr, ".plink_filter_metrics.txt"))
+  f <- file.path(DATA_DIR, "qc/reports", paste0("chr", chr, ".plink_filter_metrics.txt"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
   } else {
@@ -130,7 +125,7 @@ plink_filter_metrics <- lapply(1:22, function(chr) {
 
 # Load variant QC metrics for distribution plots
 variant_maf <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "plink", paste0(PROJECT, ".chr", chr, ".afreq"))
+  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".afreq"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
       mutate(CHR = chr)
@@ -141,7 +136,7 @@ variant_maf <- lapply(1:22, function(chr) {
 }) %>% bind_rows()
 
 variant_miss <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "plink", paste0(PROJECT, ".chr", chr, ".vmiss"))
+  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".vmiss"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
       mutate(CHR = chr)
@@ -152,7 +147,7 @@ variant_miss <- lapply(1:22, function(chr) {
 }) %>% bind_rows()
 
 variant_hwe <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "plink", paste0(PROJECT, ".chr", chr, ".hardy"))
+  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".hardy"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
       mutate(CHR = chr)
@@ -165,20 +160,43 @@ variant_hwe <- lapply(1:22, function(chr) {
 # Rename sex inference Status column to Sex first
 colnames(sex_report)[colnames(sex_report) == "Status"] <- "Sex"
 
-# Add phenotype status based on controls
-if (!is.null(controls) && length(controls) > 0) {
-  sex_report$Status <- ifelse(trimws(sex_report[,1]) %in% controls, "Control", "Case")
-  miss_report$Status <- ifelse(trimws(miss_report[,1]) %in% controls, "Control", "Case")
-  het_report$Status <- ifelse(trimws(het_report[,1]) %in% controls, "Control", "Case")
-  pca$Status <- ifelse(trimws(pca[,1]) %in% controls, "Control", "Case")
-} else {
-  sex_report$Status <- rep(NA_character_, nrow(sex_report))
-  miss_report$Status <- rep(NA_character_, nrow(miss_report))
-  het_report$Status <- rep(NA_character_, nrow(het_report))
-  pca$Status <- rep(NA_character_, nrow(pca))
+# Status and Freeze from single covariate file (FID, IID, Status, Freeze)
+id_in_report <- function(d) if ("IID" %in% names(d)) trimws(as.character(d$IID)) else trimws(as.character(d[,1]))
+status_lookup <- character(0)
+freeze_lookup <- character(0)
+sex_report$Status <- NA_character_
+sex_report$Freeze <- NA_character_
+miss_report$Status <- NA_character_
+miss_report$Freeze <- NA_character_
+het_report$Status <- NA_character_
+het_report$Freeze <- NA_character_
+pca$Status <- NA_character_
+pca$Freeze <- NA_character_
+has_freeze <- FALSE
+
+if (COVARIATE_FILE != "" && file.exists(COVARIATE_FILE)) {
+  cov_df <- read.table(COVARIATE_FILE, header = TRUE, stringsAsFactors = FALSE, comment.char = "", check.names = FALSE)
+  # Fixed columns: 1=FID, 2=IID, 3=Status, 4=Freeze (FID=IID)
+  if (nrow(cov_df) > 0 && ncol(cov_df) >= 4) {
+    iids <- trimws(as.character(cov_df[[2]]))   # IID
+    raw <- trimws(as.character(cov_df[[3]]))    # Status
+    status_val <- ifelse(raw %in% c("1", "Control", "control"), "Control",
+                  ifelse(raw %in% c("2", "Case", "case"), "Case", NA_character_))
+    status_lookup <- setNames(status_val, iids)
+    sex_report$Status <- as.character(status_lookup[id_in_report(sex_report)])
+    miss_report$Status <- as.character(status_lookup[id_in_report(miss_report)])
+    het_report$Status <- as.character(status_lookup[id_in_report(het_report)])
+    pca$Status <- as.character(status_lookup[id_in_report(pca)])
+    freeze_lookup <- setNames(trimws(as.character(cov_df[[4]])), iids)   # Freeze
+    sex_report$Freeze <- as.character(freeze_lookup[id_in_report(sex_report)])
+    miss_report$Freeze <- as.character(freeze_lookup[id_in_report(miss_report)])
+    het_report$Freeze <- as.character(freeze_lookup[id_in_report(het_report)])
+    pca$Freeze <- as.character(freeze_lookup[id_in_report(pca)])
+    has_freeze <- TRUE
+  }
 }
 ```
-
+ 
 ---
 
 # 1. Sex Check (chrX F-statistic)
@@ -206,8 +224,8 @@ passing_samples <- nrow(sex_pass)
 - **Failed Sex Check**: `r format(failed_samples, big.mark = ",")` (`r round(100 * failed_samples / total_samples, 2)`%)
 - **Passing Sex Check**: `r format(passing_samples, big.mark = ",")` (`r round(100 * passing_samples / total_samples, 2)`%)
 
-```{r sex-check-by-status, eval=!is.null(controls)}
-if (!is.null(controls) && "Status" %in% colnames(sex_fail)) {
+```{r sex-check-by-status}
+if ("Status" %in% colnames(sex_fail) && sum(!is.na(sex_report$Status)) > 0) {
   sex_fail_summary <- sex_fail %>%
     group_by(Status) %>%
     summarise(
@@ -513,8 +531,8 @@ passing_missingness <- total_after_sex - failed_missingness
 - **Failed Missingness**: `r format(failed_missingness, big.mark = ",")` (`r round(100 * failed_missingness / total_after_sex, 2)`%)
 - **Passing Missingness**: `r format(passing_missingness, big.mark = ",")` (`r round(100 * passing_missingness / total_after_sex, 2)`%)
 
-```{r missingness-by-status, eval=!is.null(controls)}
-if (!is.null(controls) && "Status" %in% colnames(miss_report)) {
+```{r missingness-by-status}
+if ("Status" %in% colnames(miss_report) && sum(!is.na(miss_report$Status)) > 0) {
   miss_fail_summary <- miss_report %>%
     group_by(Status) %>%
     summarise(
@@ -533,16 +551,14 @@ if (!is.null(controls) && "Status" %in% colnames(miss_report)) {
 ```{r missingness-distribution, fig.height=5}
 # Load aggregated missingness to see all samples
 agg_miss <- read.table(
-  file.path(DATA_DIR, "plink", paste0(PROJECT, ".aggregated_missingness.txt")),
+  file.path(DATA_DIR, "plink", "aggregated_missingness.txt"),
   header = TRUE, stringsAsFactors = FALSE, comment.char = ""
 )
 
-# Add status
-if (!is.null(controls) && length(controls) > 0) {
-  agg_miss$Status <- ifelse(trimws(agg_miss[,1]) %in% controls, "Control", "Case")
-} else {
-  agg_miss$Status <- "Unknown"
-}
+# Status and Freeze from covariate file (same as reports)
+agg_id <- if ("IID" %in% names(agg_miss)) trimws(agg_miss$IID) else trimws(agg_miss[,1])
+agg_miss$Status <- if (length(status_lookup) > 0) as.character(status_lookup[agg_id]) else "Unknown"
+agg_miss$Freeze <- if (length(freeze_lookup) > 0) as.character(freeze_lookup[agg_id]) else NA_character_
 
 ggplot(agg_miss, aes(x = F_MISS, fill = Status)) +
   geom_histogram(bins = 50, alpha = 0.7) +
@@ -576,6 +592,23 @@ miss_stats <- agg_miss %>%
 kable(miss_stats, 
       digits = 4,
       caption = "Missingness Statistics by Case/Control Status")
+```
+
+```{r missingness-stats-freeze}
+if (exists("has_freeze") && has_freeze && "Freeze" %in% names(agg_miss) && sum(!is.na(agg_miss$Freeze)) > 0) {
+  miss_stats_freeze <- agg_miss %>%
+    filter(!is.na(Freeze)) %>%
+    group_by(Freeze) %>%
+    summarise(
+      N = n(),
+      Mean = mean(F_MISS),
+      Median = median(F_MISS),
+      Above_Threshold = sum(F_MISS > MIND_THR),
+      Pct_Above = round(100 * Above_Threshold / N, 2),
+      .groups = "drop"
+    )
+  kable(miss_stats_freeze, digits = 4, caption = "Missingness Statistics by Freeze")
+}
 ```
 
 ### Failing Samples Details
@@ -659,8 +692,8 @@ passing_het <- total_after_miss - failed_het
 - **Failed Heterozygosity**: `r format(failed_het, big.mark = ",")` (`r round(100 * failed_het / total_after_miss, 2)`%)
 - **Passing Heterozygosity**: `r format(passing_het, big.mark = ",")` (`r round(100 * passing_het / total_after_miss, 2)`%)
 
-```{r het-by-status, eval=!is.null(controls)}
-if (!is.null(controls) && "Status" %in% colnames(het_report)) {
+```{r het-by-status}
+if ("Status" %in% colnames(het_report) && sum(!is.na(het_report$Status)) > 0) {
   het_fail_summary <- het_report %>%
     group_by(Status) %>%
     summarise(
@@ -669,6 +702,16 @@ if (!is.null(controls) && "Status" %in% colnames(het_report)) {
     )
   
   kable(het_fail_summary, caption = "Heterozygosity Failures by Case/Control Status")
+}
+```
+
+```{r het-by-freeze}
+if (exists("has_freeze") && has_freeze && "Freeze" %in% colnames(het_report) && sum(!is.na(het_report$Freeze)) > 0) {
+  het_fail_freeze <- het_report %>%
+    filter(!is.na(Freeze)) %>%
+    group_by(Freeze) %>%
+    summarise(N_Failed = n(), .groups = "drop")
+  kable(het_fail_freeze, caption = "Heterozygosity Failures by Freeze")
 }
 ```
 
@@ -682,7 +725,7 @@ This tests whether variants have significantly different missingness rates betwe
 
 ```{r load-diff-miss}
 # Load differential missingness test results
-diff_miss_files <- paste0("data/plink/", PROJECT, ".chr", 1:22, ".test.missing")
+diff_miss_files <- file.path(DATA_DIR, "plink", paste0("chr", 1:22, ".test.missing"))
 diff_miss <- lapply(diff_miss_files, function(f) {
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
@@ -729,6 +772,82 @@ if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
 
 **Interpretation**: Variants should fall along the diagonal (equal missingness). Points far from the line indicate differential missingness between cases and controls, which may suggest genotyping bias.
 
+---
+
+## Differential Missingness: Freeze 2 vs Freeze 3 (covariate only)
+
+Freeze (2 vs 3) is a **covariate for testing and exploration only**: we test and plot differential missingness by freeze. Nothing is removed or filtered based on this; it is for interpretation only (e.g. many cases from freeze 3).
+
+```{r load-diff-miss-freeze}
+freeze_diff_miss_files <- file.path(DATA_DIR, "plink", paste0("chr", 1:22, ".test_freeze.missing"))
+diff_miss_freeze <- lapply(freeze_diff_miss_files, function(f) {
+  if (file.exists(f)) read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") else NULL
+}) %>% bind_rows()
+has_freeze_diff_miss <- is.data.frame(diff_miss_freeze) && nrow(diff_miss_freeze) > 0
+```
+
+```{r diff-miss-freeze-summary}
+if (has_freeze_diff_miss) {
+  sig_001_f <- sum(diff_miss_freeze$P < 0.001, na.rm = TRUE)
+  sig_01_f <- sum(diff_miss_freeze$P < 0.01, na.rm = TRUE)
+  sig_05_f <- sum(diff_miss_freeze$P < 0.05, na.rm = TRUE)
+  cat("- **Total variants tested (freeze)**: ", format(nrow(diff_miss_freeze), big.mark = ","), "\n")
+  cat("- **P < 0.05**: ", format(sig_05_f, big.mark = ","), " (", round(100 * sig_05_f / nrow(diff_miss_freeze), 2), "%)\n", sep = "")
+  cat("- **P < 0.01**: ", format(sig_01_f, big.mark = ","), " (", round(100 * sig_01_f / nrow(diff_miss_freeze), 2), "%)\n", sep = "")
+  cat("- **P < 0.001**: ", format(sig_001_f, big.mark = ","), " (", round(100 * sig_001_f / nrow(diff_miss_freeze), 2), "%)\n", sep = "")
+} else {
+  cat("Freeze differential missingness was not run (set *config input.freeze_file* and run the pipeline to generate `chr*.test_freeze.missing`).\n")
+}
+```
+
+```{r diff-miss-freeze-plot, fig.height=6}
+if (has_freeze_diff_miss) {
+  # F_MISS_U = group 1 (freeze 2), F_MISS_A = group 2 (freeze 3)
+  ggplot(diff_miss_freeze, aes(x = F_MISS_U, y = F_MISS_A)) +
+    geom_point(alpha = 0.1, size = 0.5) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(
+      title = "Variant Missingness: Freeze 2 vs Freeze 3",
+      x = "Missingness in Freeze 2 (F_MISS_U)",
+      y = "Missingness in Freeze 3 (F_MISS_A)",
+      caption = "Red line = equal missingness"
+    ) +
+    theme_minimal()
+}
+```
+
+### Comparison: Case/Control vs Freeze
+
+If both case/control and freeze differential missingness were run, compare how the two relate: a large proportion of cases from freeze 3 can make case/control missingness patterns overlap with freeze 2 vs 3. Variants that are differential in both may reflect freeze/batch rather than disease.
+
+```{r diff-miss-comparison}
+if (has_freeze_diff_miss && !is.null(diff_miss) && nrow(diff_miss) > 0) {
+  # Merge by variant ID (CHR + SNP or ID column)
+  id_col <- if ("SNP" %in% names(diff_miss)) "SNP" else if ("ID" %in% names(diff_miss)) "ID" else NULL
+  if (!is.null(id_col) && id_col %in% names(diff_miss_freeze)) {
+    joint <- diff_miss %>%
+      select(any_of(c("CHR", "SNP", "ID", "P"))) %>%
+      rename(P_case_control = P) %>%
+      inner_join(
+        diff_miss_freeze %>% select(any_of(c("CHR", "SNP", "ID", "P"))) %>% rename(P_freeze = P),
+        by = c("CHR", id_col)
+      )
+    both_sig_05 <- sum(joint$P_case_control < 0.05 & joint$P_freeze < 0.05, na.rm = TRUE)
+    cat("- **Variants with data in both tests**: ", format(nrow(joint), big.mark = ","), "\n")
+    cat("- **Significant in both (P < 0.05)**: ", format(both_sig_05, big.mark = ","), 
+        " (", round(100 * both_sig_05 / nrow(joint), 2), "% of joint set)\n", sep = "")
+    cat("\nIf many variants are differential in both case/control and freeze, case/control missingness may be partly driven by freeze/batch (e.g. many cases from freeze 3).\n")
+  } else {
+    cat("Variant IDs could not be matched between case/control and freeze results.\n")
+  }
+} else if (!has_freeze_diff_miss) {
+  cat("Run freeze differential missingness to see comparison with case/control.\n")
+}
+```
+
+---
 
 # 7. Final Sample Count
 
@@ -736,25 +855,18 @@ if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
 final_samples <- passing_het
 final_variants <- variants_after_plink
 
-# Count cases/controls at each stage
-if (!is.null(controls) && length(controls) > 0) {
-  # Starting counts
-  start_cases <- sum(!trimws(sex_report[,1]) %in% controls)
-  start_controls <- sum(trimws(sex_report[,1]) %in% controls)
-  
-  # After sex check
-  postsex_cases <- total_after_sex - sum(trimws(sex_report[,1]) %in% controls)
-  postsex_controls <- sum(trimws(sex_report[,1]) %in% controls)
-  
-  # After missingness (from failing samples)
-  miss_fail_cases <- sum(!trimws(miss_report[,1]) %in% controls)
-  miss_fail_controls <- sum(trimws(miss_report[,1]) %in% controls)
+# Count cases/controls at each stage (from Status in covariate file)
+if ("Status" %in% colnames(sex_report) && sum(!is.na(sex_report$Status)) > 0) {
+  start_cases <- sum(sex_report$Status == "Case", na.rm = TRUE)
+  start_controls <- sum(sex_report$Status == "Control", na.rm = TRUE)
+  postsex_cases <- sum(sex_pass$Status == "Case", na.rm = TRUE)
+  postsex_controls <- sum(sex_pass$Status == "Control", na.rm = TRUE)
+  miss_fail_cases <- sum(miss_report$Status == "Case", na.rm = TRUE)
+  miss_fail_controls <- sum(miss_report$Status == "Control", na.rm = TRUE)
   postmiss_cases <- postsex_cases - miss_fail_cases
   postmiss_controls <- postsex_controls - miss_fail_controls
-  
-  # After heterozygosity (from failing samples)
-  het_fail_cases <- sum(!trimws(het_report[,1]) %in% controls)
-  het_fail_controls <- sum(trimws(het_report[,1]) %in% controls)
+  het_fail_cases <- sum(het_report$Status == "Case", na.rm = TRUE)
+  het_fail_controls <- sum(het_report$Status == "Control", na.rm = TRUE)
   final_cases <- postmiss_cases - het_fail_cases
   final_controls <- postmiss_controls - het_fail_controls
 }
@@ -812,11 +924,13 @@ ggplot(exclusion_data, aes(x = factor(Stage, levels = Stage), y = Samples)) +
 
 # 8. Population Structure (PCA)
 
+PCA is computed on autosomes **excluding chromosome 8** (chr 1–7, 9–22) to avoid known structural effects. The same chr8-excluded eigenvectors are used for plots and downstream analysis.
+
 ## Principal Components
 
 ```{r pca-summary}
 # Calculate variance explained
-eigenval_file <- file.path(DATA_DIR, "preprocess", paste0(PROJECT, ".build.eigenval"))
+eigenval_file <- file.path(DATA_DIR, "preprocess", "build.eigenval")
 if (!file.exists(eigenval_file)) stop(paste("Required file not found:", eigenval_file))
 eigenval <- read.table(eigenval_file, header = FALSE)
 colnames(eigenval) <- "Eigenvalue"
@@ -852,6 +966,20 @@ ggplot(pca, aes(x = PC1, y = PC2, color = Status)) +
   theme_minimal()
 ```
 
+```{r pca-plot-pc1-pc2-freeze, fig.height=6}
+if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na(pca$Freeze)) > 0) {
+  ggplot(pca %>% filter(!is.na(Freeze)), aes(x = PC1, y = PC2, color = factor(Freeze))) +
+    geom_point(alpha = 0.6) +
+    labs(
+      title = "PC1 vs PC2 by Freeze",
+      x = paste0("PC1 (", round(eigenval$Variance_Explained[1], 2), "%)"),
+      y = paste0("PC2 (", round(eigenval$Variance_Explained[2], 2), "%)"),
+      color = "Freeze"
+    ) +
+    theme_minimal()
+}
+```
+
 ### PC3 vs PC4
 
 ```{r pca-plot-pc3-pc4, fig.height=6}
@@ -864,6 +992,20 @@ ggplot(pca, aes(x = PC3, y = PC4, color = Status)) +
     color = "Status"
   ) +
   theme_minimal()
+```
+
+```{r pca-plot-pc3-pc4-freeze, fig.height=6}
+if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na(pca$Freeze)) > 0) {
+  ggplot(pca %>% filter(!is.na(Freeze)), aes(x = PC3, y = PC4, color = factor(Freeze))) +
+    geom_point(alpha = 0.6) +
+    labs(
+      title = "PC3 vs PC4 by Freeze",
+      x = paste0("PC3 (", round(eigenval$Variance_Explained[3], 2), "%)"),
+      y = paste0("PC4 (", round(eigenval$Variance_Explained[4], 2), "%)"),
+      color = "Freeze"
+    ) +
+    theme_minimal()
+}
 ```
 
 ### Scree Plot (All 20 PCs)
