@@ -46,9 +46,10 @@ This report summarizes quality control performed on whole exome sequencing data 
 1. **Sex Check**: Remove samples with ambiguous sex (chrX F-statistic)
 2. **Variant Quality Filter**: Filter variants based on high-quality heterozygotes (HQHet)
 3. **Variant-Level Filters**: Apply genotype missingness, MAF, and HWE filters
-4. **Sample Missingness**: Remove samples with excessive missing genotypes (calculated on filtered variants)
-5. **Heterozygosity**: Remove samples with outlier heterozygosity rates (calculated on filtered variants)
-6. **Population Structure**: Principal component analysis
+4. **MNP Correction**: Identify and correct multi-nucleotide variants; counts reported in QC
+5. **Sample Missingness**: Remove samples with excessive missing genotypes (calculated on filtered variants)
+6. **Heterozygosity**: Remove samples with outlier heterozygosity rates (calculated on filtered variants)
+7. **Population Structure**: Principal component analysis
 
 ---
 
@@ -156,6 +157,18 @@ variant_hwe <- lapply(1:22, function(chr) {
     data.frame(CHR = chr)
   }
 }) %>% bind_rows()
+
+# Load variant type counts after MNP correction (same format as prefilter/postfilter: TYPE COUNT)
+postmnp_counts <- lapply(1:22, function(chr) {
+  f <- file.path(DATA_DIR, "qc/reports", paste0("chr", chr, ".postmnp.variant_types.txt"))
+  if (file.exists(f)) {
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
+      mutate(CHR = chr)
+  } else {
+    data.frame(TYPE = character(0), COUNT = numeric(0), CHR = integer(0))
+  }
+}) %>% bind_rows()
+has_postmnp <- nrow(postmnp_counts) > 0 && "TYPE" %in% names(postmnp_counts) && "COUNT" %in% names(postmnp_counts)
 
 # Rename sex inference Status column to Sex first
 colnames(sex_report)[colnames(sex_report) == "Status"] <- "Sex"
@@ -507,6 +520,52 @@ ggplot(variant_hwe, aes(x = neg_log10_P)) +
                      "%) above threshold (more deviant)")
   ) +
   theme_minimal()
+```
+
+---
+
+# 3b. MNP Correction
+
+Multi-nucleotide variants (MNPs) are identified from VEP annotation, and genotypes are corrected. The counts below are from the **MNP-corrected** BCF (same `count_variant_types` logic as prefilter/postfilter), so you see SNP, INDEL, MNP, and OTHER in the annotation dataset after correction.
+
+```{r postmnp-summary}
+if (has_postmnp) {
+  postmnp_total <- sum(postmnp_counts$COUNT[postmnp_counts$TYPE == "TOTAL"], na.rm = TRUE)
+  postmnp_by_type <- postmnp_counts %>%
+    filter(TYPE != "TOTAL") %>%
+    group_by(TYPE) %>%
+    summarise(COUNT = sum(COUNT, na.rm = TRUE), .groups = "drop")
+  cat("- **Total variants (after MNP correction)**: ", format(postmnp_total, big.mark = ","), "\n", sep = "")
+} else {
+  postmnp_total <- 0
+  postmnp_by_type <- data.frame(TYPE = character(0), COUNT = numeric(0))
+  cat("Post-MNP variant type counts not found (pipeline may not have run the MNP correction step).\n")
+}
+```
+
+```{r postmnp-table}
+if (has_postmnp && nrow(postmnp_by_type) > 0) {
+  kable(postmnp_by_type,
+        format.args = list(big.mark = ","),
+        caption = "Variant Counts by Type (After MNP Correction)",
+        col.names = c("Type", "Count"))
+}
+```
+
+```{r postmnp-plot, fig.height=5}
+if (has_postmnp && nrow(postmnp_by_type) > 0) {
+  ggplot(postmnp_by_type, aes(x = TYPE, y = COUNT, fill = TYPE)) +
+    geom_col() +
+    scale_fill_manual(values = c(SNP = "#3498DB", INDEL = "#E74C3C", MNP = "#27AE60", OTHER = "#9B59B6"), guide = "none") +
+    scale_y_continuous(labels = scales::comma) +
+    labs(
+      title = "Variant Types After MNP Correction",
+      x = "Variant Type",
+      y = "Count",
+      caption = paste0("Total: ", format(postmnp_total, big.mark = ","), " variants")
+    ) +
+    theme_minimal()
+}
 ```
 
 ---

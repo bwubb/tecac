@@ -236,7 +236,7 @@ rule count_variant_types_postfilter:
 #   -> aggregate missingness/het -> exclusions -> two branches:
 #       (A) qc_filter2 + build merge + PCA  (B) het_miss VCF -> MNP pipeline -> annotation pgen + VEP
 #   -> report, final_annotation, final_build, final_lists
-# Requires: config input.covariates = path to file (cols: FID, IID, Status, Freeze) for diff-miss and report.
+# Requires: config input.covariates = path to file (cols: FID, IID, FREEZE, STATUS) for diff-miss and report.
 # ---------------------------------------------------------------------------
 
 # Convert filtered BCF to PLINK format
@@ -361,12 +361,12 @@ rule parse_plink_filter_metrics:
         """
         echo "CHR FILTER VARIANTS_REMOVED" > {output}
         
-        # Extract variant removal counts from log (plink2 wording may vary)
-        GENO=$(grep -oP '\\K[0-9]+(?= variants removed due to missing genotype data)' {input.log} 2>/dev/null || echo 0)
-        MAF=$(grep -oP '\\K[0-9]+(?= variants removed due to allele frequency threshold)' {input.log} 2>/dev/null || echo 0)
-        HWE=$(grep -oP '\\K[0-9]+(?= variants removed due to Hardy-Weinberg exact test)' {input.log} 2>/dev/null || echo 0)
+        # Extract variant removal counts from log (portable: sed, no grep -P)
+        GENO=$(sed -n 's/.* \([0-9][0-9]*\) variants removed due to missing genotype data.*/\1/p' {input.log} 2>/dev/null | head -1); GENO=${{GENO:-0}}
+        MAF=$(sed -n 's/.* \([0-9][0-9]*\) variants removed due to allele frequency threshold.*/\1/p' {input.log} 2>/dev/null | head -1); MAF=${{MAF:-0}}
+        HWE=$(sed -n 's/.* \([0-9][0-9]*\) variants removed due to Hardy-Weinberg exact test.*/\1/p' {input.log} 2>/dev/null | head -1); HWE=${{HWE:-0}}
         # LD pruning: plink2 writes excluded IDs to .prune.out; use line count (no header)
-        PRUNE=$(wc -l < {input.prune_out} 2>/dev/null || echo 0)
+        PRUNE=$(wc -l < {input.prune_out} 2>/dev/null); PRUNE=${{PRUNE:-0}}
         
         echo "{wildcards.CHR} GENO $GENO" >> {output}
         echo "{wildcards.CHR} MAF $MAF" >> {output}
@@ -374,7 +374,7 @@ rule parse_plink_filter_metrics:
         echo "{wildcards.CHR} PRUNE $PRUNE" >> {output}
         """
 
-# Test for differential missingness case vs control (plink 1.9). Needs covariates file: cols 1=FID, 2=IID, 3=Status, 4=Freeze.
+# Test for differential missingness case vs control (plink 1.9). Covariates: cols 1=FID, 2=IID, 3=FREEZE, 4=STATUS.
 rule plink_test_missing:
     wildcard_constraints:
         CHR='[0-9]+'
@@ -396,12 +396,12 @@ rule plink_test_missing:
     shell:
         """
         plink2 --pfile {params.inputname} --make-bed --out {params.bed_prefix}
-        awk 'NR==1 {{next}} {{g=($3==1||$3=="Control"||$3=="control"?1:($3==2||$3=="Case"||$3=="case"?2:0)); if(g>0) print $1,$2,g}}' {input.covariates} | cat <(echo -e "FID\\tIID\\tCASE") - > {params.pheno_file}
+        awk 'NR==1 {{next}} {{g=($4==0||$4=="Control"||$4=="control"?1:($4==1||$4=="Case"||$4=="case"?2:0)); if(g>0) print $1,$2,g}}' {input.covariates} | cat <(echo -e "FID\\tIID\\tCASE") - > {params.pheno_file}
         plink --bfile {params.bed_prefix} --test-missing --pheno {params.pheno_file} --allow-no-sex --out {params.outputname}
         rm -f {params.bed_prefix}.bed {params.bed_prefix}.bim {params.bed_prefix}.fam {params.bed_prefix}.log {params.pheno_file}
         """
 
-# Differential missingness freeze 2 vs 3 (covariate only; same covariates file, col 4=Freeze).
+# Differential missingness freeze 2 vs 3 (covariates col 3=FREEZE; header FREEZE in pheno).
 rule plink_test_missing_freeze:
     wildcard_constraints:
         CHR='[0-9]+'
@@ -424,8 +424,8 @@ rule plink_test_missing_freeze:
     shell:
         """
         plink2 --pfile {params.inputname} --make-bed --out {params.bed_prefix}
-        awk 'NR==1 {{next}} $4==2||$4==3 {{print $1,$2}}' {input.covariates} > {params.sample_list}
-        awk 'NR==1 {{next}} $4==2||$4==3 {{g=($4==2?1:2); print $1,$2,g}}' {input.covariates} | cat <(echo -e "FID\\tIID\\tFREEZE_GROUP") - > {params.pheno_file}
+        awk 'NR==1 {{next}} $3==2||$3==3 {{print $1,$2}}' {input.covariates} > {params.sample_list}
+        awk 'NR==1 {{next}} $3==2||$3==3 {{g=($3==2?1:2); print $1,$2,g}}' {input.covariates} | cat <(echo -e "FID\\tIID\\tFREEZE") - > {params.pheno_file}
         plink --bfile {params.bed_prefix} --keep {params.sample_list} --test-missing --pheno {params.pheno_file} --allow-no-sex --out {params.outputname}
         rm -f {params.bed_prefix}.bed {params.bed_prefix}.bim {params.bed_prefix}.fam {params.bed_prefix}.log {params.pheno_file} {params.sample_list}
         """
@@ -825,6 +825,27 @@ rule bcftools_annotation2_vcf:
         bcftools view -G -Ov -o {output.vcf} {input.bcf}
         """
 
+# Count variant types after MNP correction (same format as postfilter: TYPE COUNT)
+rule count_variant_types_postmnp:
+    wildcard_constraints:
+        CHR='[0-9]+'
+    input:
+        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.mnp_gt.sorted.bcf"
+    output:
+        "data/qc/reports/chr{CHR}.postmnp.variant_types.txt"
+    log:
+        stderr="logs/lsf/count_variant_types_postmnp.chr{CHR}.e",
+        stdout="logs/lsf/count_variant_types_postmnp.chr{CHR}.o"
+    shell:
+        """
+        echo "TYPE COUNT" > {output}
+        echo "TOTAL $(bcftools view -H {input.bcf} | wc -l)" >> {output}
+        echo "SNP $(bcftools view -v snps -H {input.bcf} | wc -l)" >> {output}
+        echo "INDEL $(bcftools view -v indels -H {input.bcf} | wc -l)" >> {output}
+        echo "MNP $(bcftools view -v mnps -H {input.bcf} | wc -l)" >> {output}
+        echo "OTHER $(bcftools view -v other -H {input.bcf} | wc -l)" >> {output}
+        """
+
 rule plink2_annotation_pgen:
     wildcard_constraints:
         CHR='[0-9]+'
@@ -996,7 +1017,8 @@ rule generate_qc_report:
         variant_vmiss=expand("data/plink/chr{CHR}.vmiss",CHR=CHROMOSOMES_AUTOSOMAL),
         variant_hardy=expand("data/plink/chr{CHR}.hardy",CHR=CHROMOSOMES_AUTOSOMAL),
         diff_miss_tests=expand("data/plink/chr{CHR}.test.missing",CHR=CHROMOSOMES_AUTOSOMAL),
-        diff_miss_freeze_tests=expand("data/plink/chr{CHR}.test_freeze.missing",CHR=CHROMOSOMES_AUTOSOMAL)
+        diff_miss_freeze_tests=expand("data/plink/chr{CHR}.test_freeze.missing",CHR=CHROMOSOMES_AUTOSOMAL),
+        postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL)
     output:
         "data/qc/reports/exwas_qc_report.html"
     params:
@@ -1067,7 +1089,7 @@ rule final_build:
         rsync -av {input.eigenval} {output.eigenval}
         """
     
-# Splits passing samples into controls vs cases. Prefers covariate file (col3=Status); else separate controls file.
+# Splits passing samples into controls vs cases. Prefers covariate file (col4=STATUS); else separate controls file.
 rule final_lists:
     input:
         samples="data/qc/passing_samples.txt",
@@ -1089,7 +1111,7 @@ rule final_lists:
         with open(input.exclusions2,'r') as e2:
             exclusions.extend(e2.read().splitlines())
 
-        # Controls: from covariate file (col2=IID, col3=Status) if present, else separate controls file
+        # Controls: from covariate file (col2=IID, col4=STATUS) if present, else separate controls file
         controls = set()
         if params.covariates and os.path.isfile(params.covariates):
             with open(params.covariates,'r') as f:
@@ -1097,7 +1119,7 @@ rule final_lists:
             if len(lines) > 1:
                 for line in lines[1:]:
                     parts = line.strip().split()
-                    if len(parts) >= 3 and parts[2] in ('1', 'Control', 'control', 'CONTROL'):
+                    if len(parts) >= 4 and parts[3] in ('0', 'Control', 'control', 'CONTROL'):
                         controls.add(parts[1])  # IID
         elif params.controls_file and os.path.isfile(params.controls_file):
             with open(params.controls_file,'r') as c:
