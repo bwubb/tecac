@@ -16,17 +16,19 @@ output_aggregated=args.output_aggregated
 output_exclusions=args.output_exclusions
 output_report=args.output_report
 
+# plink2 .smiss has #FID and IID (double ID); use IID for sample key
+id_col='IID' if 'IID' in pd.read_csv(input_files[0],sep='\s+',nrows=0).columns else '#IID'
 dfs=[]
 for f in input_files:
-    df=pd.read_csv(f,sep='\\s+')
-    dfs.append(df[['#IID','MISSING_CT','OBS_CT']])
+    df=pd.read_csv(f,sep='\s+')
+    dfs.append(df[[id_col,'MISSING_CT','OBS_CT']])
 
 combined=pd.concat(dfs)
-agg=combined.groupby('#IID').sum().reset_index()
+agg=combined.groupby(id_col).sum().reset_index()
 agg['F_MISS']=agg['MISSING_CT']/agg['OBS_CT']
 
 agg.to_csv(output_aggregated,sep='\t',index=False)
 
 high_miss=agg[agg['F_MISS']>mind_thr]
-high_miss['#IID'].to_csv(output_exclusions,sep=' ',index=False,header=False)
-high_miss[['#IID','F_MISS']].to_csv(output_report,sep=',',index=False,header=True)
+high_miss[id_col].to_csv(output_exclusions,sep=' ',index=False,header=False)
+high_miss[[id_col,'F_MISS']].to_csv(output_report,sep=',',index=False,header=True)

@@ -49,7 +49,8 @@ This report summarizes quality control performed on whole exome sequencing data 
 4. **MNP Correction**: Identify and correct multi-nucleotide variants; counts reported in QC
 5. **Sample Missingness**: Remove samples with excessive missing genotypes (calculated on filtered variants)
 6. **Heterozygosity**: Remove samples with outlier heterozygosity rates (calculated on filtered variants)
-7. **Population Structure**: Principal component analysis
+7. **Population Structure**: Principal component analysis on the genotype **build** (same samples as after het QC)
+8. **PCA outlier filter**: Samples with **PC4 > 0.3** on that PCA are listed for removal from a **second** PCA (`build_pca_clean.*`) used for ancestry-style covariates; **genotype callset / build.psam sample count is unchanged**
 
 ---
 
@@ -68,15 +69,52 @@ miss_file <- file.path(DATA_DIR, "qc/reports", "missingness_report.txt")
 if (!file.exists(miss_file)) stop(paste("Required file not found:", miss_file))
 miss_report <- read.csv(miss_file, stringsAsFactors = FALSE)
 
-# Load heterozygosity report
-het_file <- file.path(DATA_DIR, "qc/reports", "heterozygosity_report.txt")
-if (!file.exists(het_file)) stop(paste("Required file not found:", het_file))
-het_report <- read.csv(het_file, stringsAsFactors = FALSE)
+# Heterozygosity: build_files writes het_report.txt (1-row summary n/mean/sd) + het_exclusions.txt (failed FID IID).
+# Legacy: heterozygosity_report.txt as a per-sample table.
+het_sum <- file.path(DATA_DIR, "qc/reports", "het_report.txt")
+het_legacy <- file.path(DATA_DIR, "qc/reports", "heterozygosity_report.txt")
+het_exc <- file.path(DATA_DIR, "qc/exclusions", "het_exclusions.txt")
+if (file.exists(het_sum)) {
+  ht <- utils::read.table(het_sum, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+  if (nrow(ht) <= 2L && all(c("n", "mean", "sd") %in% names(ht))) {
+    if (file.exists(het_exc)) {
+      het_report <- utils::read.table(het_exc, header = TRUE, stringsAsFactors = FALSE, comment.char = "", check.names = FALSE)
+    } else {
+      het_report <- data.frame(IID = character(0), stringsAsFactors = FALSE)
+    }
+  } else {
+    het_report <- ht
+  }
+} else if (file.exists(het_legacy)) {
+  het_report <- read.csv(het_legacy, stringsAsFactors = FALSE)
+} else {
+  stop("Required: qc/reports/het_report.txt (+ qc/exclusions/het_exclusions.txt) or qc/reports/heterozygosity_report.txt")
+}
+if (!"IID" %in% names(het_report) && ncol(het_report) >= 2) {
+  names(het_report)[2] <- "IID"
+}
 
-# Load PCA results
-pca_file <- file.path(DATA_DIR, "preprocess", "build.eigenvec")
-if (!file.exists(pca_file)) stop(paste("Required file not found:", pca_file))
+# Load PCA results (build_files: build_pca.eigenvec; legacy: build.eigenvec)
+pca_file <- file.path(DATA_DIR, "preprocess", "build_pca.eigenvec")
+if (!file.exists(pca_file)) pca_file <- file.path(DATA_DIR, "preprocess", "build.eigenvec")
+if (!file.exists(pca_file)) stop(paste("Required file not found: preprocess/build_pca.eigenvec or build.eigenvec"))
 pca <- read.table(pca_file, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+
+pca_exc_path <- file.path(DATA_DIR, "qc/exclusions", "pca_outliers.txt")
+pca_report_path <- file.path(DATA_DIR, "qc/reports", "pca_outlier_report.txt")
+has_pca_outlier_qc <- file.exists(pca_report_path)
+if (has_pca_outlier_qc) {
+  pca_outlier_summary <- utils::read.table(pca_report_path, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+} else {
+  pca_outlier_summary <- NULL
+}
+pca_clean_file <- file.path(DATA_DIR, "preprocess", "build_pca_clean.eigenvec")
+has_pca_clean <- file.exists(pca_clean_file)
+if (has_pca_clean) {
+  pca_clean <- utils::read.table(pca_clean_file, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
+} else {
+  pca_clean <- NULL
+}
 
 # Load variant type counts (prefilter)
 prefilter_counts <- lapply(1:22, function(chr) {
@@ -173,40 +211,58 @@ has_postmnp <- nrow(postmnp_counts) > 0 && "TYPE" %in% names(postmnp_counts) && 
 # Rename sex inference Status column to Sex first
 colnames(sex_report)[colnames(sex_report) == "Status"] <- "Sex"
 
-# Status and Freeze from single covariate file (FID, IID, Status, Freeze)
+# Status and Freeze from single covariate file (FID, IID, FREEZE, STATUS)
 id_in_report <- function(d) if ("IID" %in% names(d)) trimws(as.character(d$IID)) else trimws(as.character(d[,1]))
 status_lookup <- character(0)
 freeze_lookup <- character(0)
-sex_report$Status <- NA_character_
-sex_report$Freeze <- NA_character_
-miss_report$Status <- NA_character_
-miss_report$Freeze <- NA_character_
-het_report$Status <- NA_character_
-het_report$Freeze <- NA_character_
-pca$Status <- NA_character_
-pca$Freeze <- NA_character_
+# Use length nrow(.) so 0-row tables (e.g. empty missingness_report.txt) don't trigger replacement error
+sex_report$Status <- rep(NA_character_, nrow(sex_report))
+sex_report$Freeze <- rep(NA_character_, nrow(sex_report))
+miss_report$Status <- rep(NA_character_, nrow(miss_report))
+miss_report$Freeze <- rep(NA_character_, nrow(miss_report))
+het_report$Status <- rep(NA_character_, nrow(het_report))
+het_report$Freeze <- rep(NA_character_, nrow(het_report))
+pca$Status <- rep(NA_character_, nrow(pca))
+pca$Freeze <- rep(NA_character_, nrow(pca))
 has_freeze <- FALSE
 
 if (COVARIATE_FILE != "" && file.exists(COVARIATE_FILE)) {
   cov_df <- read.table(COVARIATE_FILE, header = TRUE, stringsAsFactors = FALSE, comment.char = "", check.names = FALSE)
-  # Fixed columns: 1=FID, 2=IID, 3=Status, 4=Freeze (FID=IID)
+  # Columns: 1=FID, 2=IID, 3=FREEZE, 4=STATUS
   if (nrow(cov_df) > 0 && ncol(cov_df) >= 4) {
     iids <- trimws(as.character(cov_df[[2]]))   # IID
-    raw <- trimws(as.character(cov_df[[3]]))    # Status
-    status_val <- ifelse(raw %in% c("1", "Control", "control"), "Control",
-                  ifelse(raw %in% c("2", "Case", "case"), "Case", NA_character_))
+    raw_status <- trimws(as.character(cov_df[[4]]))   # STATUS
+    status_val <- ifelse(raw_status %in% c("1", "Control", "control"), "Control",
+                  ifelse(raw_status %in% c("2", "Case", "case"), "Case", NA_character_))
     status_lookup <- setNames(status_val, iids)
     sex_report$Status <- as.character(status_lookup[id_in_report(sex_report)])
     miss_report$Status <- as.character(status_lookup[id_in_report(miss_report)])
     het_report$Status <- as.character(status_lookup[id_in_report(het_report)])
     pca$Status <- as.character(status_lookup[id_in_report(pca)])
-    freeze_lookup <- setNames(trimws(as.character(cov_df[[4]])), iids)   # Freeze
+    freeze_lookup <- setNames(trimws(as.character(cov_df[[3]])), iids)   # FREEZE
     sex_report$Freeze <- as.character(freeze_lookup[id_in_report(sex_report)])
     miss_report$Freeze <- as.character(freeze_lookup[id_in_report(miss_report)])
     het_report$Freeze <- as.character(freeze_lookup[id_in_report(het_report)])
     pca$Freeze <- as.character(freeze_lookup[id_in_report(pca)])
+    if (!is.null(pca_clean)) {
+      pca_clean$Status <- as.character(status_lookup[id_in_report(pca_clean)])
+      pca_clean$Freeze <- as.character(freeze_lookup[id_in_report(pca_clean)])
+    }
     has_freeze <- TRUE
   }
+}
+
+if (!is.null(pca_clean) && !"Status" %in% names(pca_clean)) {
+  pca_clean$Status <- rep(NA_character_, nrow(pca_clean))
+  pca_clean$Freeze <- rep(NA_character_, nrow(pca_clean))
+}
+
+if (file.exists(pca_exc_path) && file.info(pca_exc_path)$size > 0L) {
+  po <- utils::read.table(pca_exc_path, header = FALSE, stringsAsFactors = FALSE, col.names = c("FID", "IID"))
+  bad_iid <- trimws(as.character(po$IID))
+  pca$PCA_outlier <- trimws(as.character(pca$IID)) %in% bad_iid
+} else {
+  pca$PCA_outlier <- FALSE
 }
 ```
  
@@ -422,23 +478,6 @@ if (nrow(plink_filter_metrics) > 0 && "FILTER" %in% names(plink_filter_metrics) 
 
 ### LD Pruning Impact
 
-```{r ld-pruning-table}
-if (nrow(ld_prune_summary) > 0) {
-  ld_prune_summary <- ld_prune_summary %>%
-    mutate(
-      CHR = as.integer(as.character(CHR)),
-      Pct_of_Input = ifelse(variants_before_plink > 0, round(100 * Variants_Removed / variants_before_plink, 2), 0)
-    )
-  
-  kable(ld_prune_summary,
-        format.args = list(big.mark = ","),
-        caption = "LD Pruning Removals by Chromosome",
-        col.names = c("Chromosome", "Variants Removed", "% of Input SNPs"))
-} else {
-  cat("No LD pruning counts were recorded in the filter metrics.\n")
-}
-```
-
 ```{r ld-pruning-plot, fig.height=5}
 if (nrow(ld_prune_summary) > 0) {
   ggplot(ld_prune_summary, aes(x = factor(CHR, levels = CHR), y = Variants_Removed)) +
@@ -459,26 +498,29 @@ if (nrow(ld_prune_summary) > 0) {
 
 These distributions show the spread of variant-level QC metrics and where thresholds are set.
 
-```{r maf-distribution, fig.height=5}
-# Calculate MAF (minimum of ALT_FREQS and 1-ALT_FREQS)
-variant_maf$MAF <- pmin(variant_maf$ALT_FREQS, 1 - variant_maf$ALT_FREQS)
-
-ggplot(variant_maf, aes(x = MAF)) +
-  geom_histogram(bins = 100, fill = "steelblue", alpha = 0.7) +
-  geom_vline(xintercept = MAF_THR, linetype = "dashed", color = "red", linewidth = 1) +
-  scale_x_continuous(labels = scales::percent, breaks = seq(0, 0.1, 0.01), limits = c(0, 0.1)) +
-  scale_y_continuous(labels = scales::comma) +
-  labs(
-    title = "Minor Allele Frequency Distribution (0-10%)",
-    x = "MAF",
-    y = "Variant Count",
-    caption = paste0("Red line = ", MAF_THR * 100, "% threshold | ", 
-                     format(sum(variant_maf$MAF < MAF_THR), big.mark = ","), 
-                     " variants (", 
-                     round(100 * sum(variant_maf$MAF < MAF_THR) / nrow(variant_maf), 1),
-                     "%) below threshold")
-  ) +
-  theme_minimal()
+```{r maf-below-threshold, fig.height=5}
+# MAF from data/plink/chr*.afreq (PLINK --freq). Variants below threshold only (what gets filtered out).
+afreq_col <- if ("ALT_FREQS" %in% names(variant_maf)) "ALT_FREQS" else "ALT_FREQ"
+variant_maf$MAF <- pmin(variant_maf[[afreq_col]], 1 - variant_maf[[afreq_col]])
+maf_below <- variant_maf %>% filter(MAF < MAF_THR)
+if (nrow(maf_below) > 0) {
+  x_max <- max(MAF_THR * 1.05, max(maf_below$MAF, na.rm = TRUE) * 1.05, 0.001)
+  ggplot(maf_below, aes(x = MAF)) +
+    geom_histogram(bins = 50, fill = "steelblue", alpha = 0.7) +
+    geom_vline(xintercept = MAF_THR, linetype = "dashed", color = "red", linewidth = 1) +
+    scale_x_continuous(labels = scales::percent, limits = c(0, x_max)) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(
+      title = "MAF distribution: variants below threshold (excluded by QC)",
+      subtitle = sprintf("n = %s variants excluded by MAF < %s%%", format(nrow(maf_below), big.mark = ","), MAF_THR * 100),
+      x = "MAF",
+      y = "Variant Count",
+      caption = "Red line = MAF threshold; these variants are removed by QC"
+    ) +
+    theme_minimal()
+} else {
+  cat("No variants below the MAF threshold.\n")
+}
 ```
 
 ```{r geno-distribution, fig.height=5}
@@ -673,12 +715,13 @@ if (exists("has_freeze") && has_freeze && "Freeze" %in% names(agg_miss) && sum(!
 ### Failing Samples Details
 
 ```{r failing-samples-distribution}
-# Show distribution of failing samples
+# Show distribution of failing samples (sample ID column is IID in aggregated_missingness.txt)
+id_col_miss <- if ("IID" %in% names(agg_miss)) "IID" else names(agg_miss)[1]
 failing_samples <- agg_miss %>%
   filter(F_MISS > MIND_THR) %>%
   arrange(desc(F_MISS)) %>%
   mutate(
-    Sample_ID = X.IID,
+    Sample_ID = .data[[id_col_miss]],
     Missingness_Pct = round(F_MISS * 100, 2)
   )
 
@@ -811,25 +854,110 @@ if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
 }
 ```
 
-```{r diff-miss-plot, fig.height=6}
+### Before excluding P \< 1e-5 (all variants from test-missing)
+
+All plots in this section use the **original** case/control `--test-missing` output (no re-run). Below: density and Q-Q on the full set.
+
+```{r diff-miss-density-before, fig.height=6}
 if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
-  # Plot missingness rates: cases vs controls
   ggplot(diff_miss, aes(x = F_MISS_U, y = F_MISS_A)) +
-    geom_point(alpha = 0.1, size = 0.5) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+    geom_hex(bins = 30, color = "gray65", linewidth = 0.25) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
     scale_x_continuous(labels = scales::percent) +
     scale_y_continuous(labels = scales::percent) +
+    scale_fill_gradient(low = "gray92", high = "darkblue", name = "Variants") +
     labs(
-      title = "Variant Missingness: Cases vs Controls",
+      title = "Variant Missingness: Cases vs Controls (before filter)",
+      subtitle = sprintf("n = %s variants; fill = count per hex", format(nrow(diff_miss), big.mark = ",")),
       x = "Missingness in Controls (F_MISS_U)",
       y = "Missingness in Cases (F_MISS_A)",
-      caption = "Red line = equal missingness | Points above line = higher missingness in cases"
+      caption = "Red line = equal missingness"
     ) +
     theme_minimal()
 }
 ```
 
-**Interpretation**: Variants should fall along the diagonal (equal missingness). Points far from the line indicate differential missingness between cases and controls, which may suggest genotyping bias.
+```{r diff-miss-qq-before, fig.height=5}
+if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
+  p_vals <- diff_miss$P[!is.na(diff_miss$P) & diff_miss$P > 0]
+  n <- length(p_vals)
+  if (n > 0) {
+    observed <- -log10(sort(p_vals))
+    expected <- -log10(ppoints(n))
+    qq_df <- data.frame(expected = expected, observed = observed)
+    lambda_before <- median(qchisq(1 - p_vals, df = 1), na.rm = TRUE) / qchisq(0.5, 1)
+    ggplot(qq_df, aes(x = expected, y = observed)) +
+      geom_point(alpha = 0.3, size = 0.8) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+      labs(
+        title = "Q-Q plot: Differential missingness P-values (before filter)",
+        subtitle = sprintf("λ = %.4f", lambda_before),
+        x = "Expected -log10(P)",
+        y = "Observed -log10(P)",
+        caption = "Under null, points follow the red line"
+      ) +
+      theme_minimal()
+  }
+}
+```
+
+### After excluding variants with P \< 1e-5
+
+Same test-missing output, but density and Q-Q use only variants with P ≥ 1e-5 (the set that remains after removing differential-missingness failures).
+
+```{r diff-miss-after-filter}
+DIFF_MISS_P_THR <- 1e-5
+diff_miss_cc_plot <- if (!is.null(diff_miss) && nrow(diff_miss) > 0) {
+  d <- diff_miss %>% filter(!is.na(P) & P >= DIFF_MISS_P_THR)
+  if (nrow(d) > 0) d else NULL
+} else NULL
+n_excluded_cc <- if (!is.null(diff_miss) && nrow(diff_miss) > 0) sum(diff_miss$P < DIFF_MISS_P_THR, na.rm = TRUE) else 0L
+```
+
+```{r diff-miss-density-plot, fig.height=6}
+if (!is.null(diff_miss_cc_plot) && nrow(diff_miss_cc_plot) > 0) {
+  ggplot(diff_miss_cc_plot, aes(x = F_MISS_U, y = F_MISS_A)) +
+    geom_hex(bins = 30, color = "gray65", linewidth = 0.25) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+    scale_x_continuous(labels = scales::percent) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_fill_gradient(low = "gray92", high = "darkblue", name = "Variants") +
+    labs(
+      title = "Variant Missingness: Cases vs Controls (after filter)",
+      subtitle = sprintf("n = %s variants (excluded P < 1e-5: %s); fill = count per hex", format(nrow(diff_miss_cc_plot), big.mark = ","), format(n_excluded_cc, big.mark = ",")),
+      x = "Missingness in Controls (F_MISS_U)",
+      y = "Missingness in Cases (F_MISS_A)",
+      caption = "Red line = equal missingness"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r diff-miss-qq-plot, fig.height=5}
+if (!is.null(diff_miss_cc_plot) && nrow(diff_miss_cc_plot) > 0) {
+  p_vals <- diff_miss_cc_plot$P[!is.na(diff_miss_cc_plot$P) & diff_miss_cc_plot$P > 0]
+  n <- length(p_vals)
+  if (n > 0) {
+    observed <- -log10(sort(p_vals))
+    expected <- -log10(ppoints(n))
+    qq_df <- data.frame(expected = expected, observed = observed)
+    lambda_cc <- median(qchisq(1 - p_vals, df = 1), na.rm = TRUE) / qchisq(0.5, 1)
+    ggplot(qq_df, aes(x = expected, y = observed)) +
+      geom_point(alpha = 0.3, size = 0.8) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+      labs(
+        title = "Q-Q plot: Differential missingness P-values (after filter)",
+        subtitle = sprintf("P ≥ 1e-5 only (λ = %.4f)", lambda_cc),
+        x = "Expected -log10(P)",
+        y = "Observed -log10(P)",
+        caption = "Under null, points follow the red line"
+      ) +
+      theme_minimal()
+  }
+}
+```
+
+**Interpretation**: Variants should fall along the diagonal (equal missingness). Points far from the line indicate differential missingness between cases and controls, which may suggest genotyping bias. Before/after comparison shows the effect of removing variants with P \< 1e-5.
 
 ---
 
@@ -859,21 +987,46 @@ if (has_freeze_diff_miss) {
 }
 ```
 
-```{r diff-miss-freeze-plot, fig.height=6}
+```{r diff-miss-freeze-density-plot, fig.height=6}
 if (has_freeze_diff_miss) {
-  # F_MISS_U = group 1 (freeze 2), F_MISS_A = group 2 (freeze 3)
   ggplot(diff_miss_freeze, aes(x = F_MISS_U, y = F_MISS_A)) +
-    geom_point(alpha = 0.1, size = 0.5) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+    geom_hex(bins = 30, color = "gray65", linewidth = 0.25) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
     scale_x_continuous(labels = scales::percent) +
     scale_y_continuous(labels = scales::percent) +
+    scale_fill_gradient(low = "gray92", high = "darkblue", name = "Variants") +
     labs(
       title = "Variant Missingness: Freeze 2 vs Freeze 3",
+      subtitle = sprintf("n = %s variants; fill = count per hex", format(nrow(diff_miss_freeze), big.mark = ",")),
       x = "Missingness in Freeze 2 (F_MISS_U)",
       y = "Missingness in Freeze 3 (F_MISS_A)",
       caption = "Red line = equal missingness"
     ) +
     theme_minimal()
+}
+```
+
+```{r diff-miss-freeze-qq-plot, fig.height=5}
+if (has_freeze_diff_miss) {
+  p_vals_f <- diff_miss_freeze$P[!is.na(diff_miss_freeze$P) & diff_miss_freeze$P > 0]
+  n_f <- length(p_vals_f)
+  if (n_f > 0) {
+    observed_f <- -log10(sort(p_vals_f))
+    expected_f <- -log10(ppoints(n_f))
+    qq_df_f <- data.frame(expected = expected_f, observed = observed_f)
+    lambda_freeze <- median(qchisq(1 - p_vals_f, df = 1), na.rm = TRUE) / qchisq(0.5, 1)
+    ggplot(qq_df_f, aes(x = expected, y = observed)) +
+      geom_point(alpha = 0.3, size = 0.8) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red", linewidth = 1) +
+      labs(
+        title = "Q-Q plot: Differential missingness P-values (Freeze 2 vs Freeze 3)",
+        subtitle = sprintf("λ = %.4f", lambda_freeze),
+        x = "Expected -log10(P)",
+        y = "Observed -log10(P)",
+        caption = "Under null, points follow the red line; deviation at low P suggests enrichment of differential missingness"
+      ) +
+      theme_minimal()
+  }
 }
 ```
 
@@ -914,6 +1067,21 @@ if (has_freeze_diff_miss && !is.null(diff_miss) && nrow(diff_miss) > 0) {
 final_samples <- passing_het
 final_variants <- variants_after_plink
 
+pca_fail_cases <- 0L
+pca_fail_controls <- 0L
+samples_after_pca_ancestry <- NA_integer_
+if (exists("has_pca_outlier_qc") && has_pca_outlier_qc && !is.null(pca_outlier_summary)) {
+  samples_after_pca_ancestry <- as.integer(pca_outlier_summary$n_after_pca[1])
+}
+if (exists("has_pca_outlier_qc") && has_pca_outlier_qc && exists("pca_exc_path") &&
+    file.exists(pca_exc_path) && file.info(pca_exc_path)$size > 0L && exists("status_lookup") && length(status_lookup) > 0L) {
+  po <- utils::read.table(pca_exc_path, header = FALSE, stringsAsFactors = FALSE, col.names = c("FID", "IID"))
+  iid_out <- trimws(as.character(po$IID))
+  st <- unname(status_lookup[iid_out])
+  pca_fail_cases <- sum(st == "Case", na.rm = TRUE)
+  pca_fail_controls <- sum(st == "Control", na.rm = TRUE)
+}
+
 # Count cases/controls at each stage (from Status in covariate file)
 if ("Status" %in% colnames(sex_report) && sum(!is.na(sex_report$Status)) > 0) {
   start_cases <- sum(sex_report$Status == "Case", na.rm = TRUE)
@@ -934,24 +1102,29 @@ if ("Status" %in% colnames(sex_report) && sum(!is.na(sex_report$Status)) > 0) {
 ## Summary
 
 - **Starting Samples**: `r format(total_samples, big.mark = ",")` (`r if(exists("start_cases")) paste0(format(start_cases, big.mark=","), " cases, ", format(start_controls, big.mark=","), " controls")`)
-- **Final Samples**: `r format(final_samples, big.mark = ",")` (`r if(exists("final_cases")) paste0(format(final_cases, big.mark=","), " cases, ", format(final_controls, big.mark=","), " controls")`) 
+- **Final Samples**: `r format(final_samples, big.mark = ",")` (`r if(exists("final_cases")) paste0(format(final_cases, big.mark=","), " cases, ", format(final_controls, big.mark=","), " controls")`) (genotype **build** after het QC; unchanged by PCA outlier list)
 - **Total Excluded**: `r format(total_samples - final_samples, big.mark = ",")` (`r if(exists("start_cases")) paste0(format(start_cases - final_cases, big.mark=","), " cases, ", format(start_controls - final_controls, big.mark=","), " controls")`)
+`r if (exists("has_pca_outlier_qc") && has_pca_outlier_qc && !is.na(samples_after_pca_ancestry)) sprintf("- **Samples in PC-adjusted PCA** (build_pca_clean): %s (after PC4>0.3 exclusion; ancestry PCs only)", format(samples_after_pca_ancestry, big.mark = ",")) else ""`
 
 ### Samples Excluded by Stage
 
 ```{r exclusion-by-stage}
 if (exists("start_cases")) {
-  exclusion_breakdown <- data.frame(
-    Stage = c("Sex Check", "Missingness", "Heterozygosity"),
-    Cases_Excluded = c(start_cases - postsex_cases, miss_fail_cases, het_fail_cases),
-    Controls_Excluded = c(start_controls - postsex_controls, miss_fail_controls, het_fail_controls)
-  ) %>%
+  stg <- c("Sex Check", "Missingness", "Heterozygosity")
+  cex <- c(start_cases - postsex_cases, miss_fail_cases, het_fail_cases)
+  ctl <- c(start_controls - postsex_controls, miss_fail_controls, het_fail_controls)
+  if (exists("has_pca_outlier_qc") && has_pca_outlier_qc) {
+    stg <- c(stg, "PCA (structure)")
+    cex <- c(cex, pca_fail_cases)
+    ctl <- c(ctl, pca_fail_controls)
+  }
+  exclusion_breakdown <- data.frame(Stage = stg, Cases_Excluded = cex, Controls_Excluded = ctl) %>%
     mutate(
       Total_Excluded = Cases_Excluded + Controls_Excluded,
-      Pct_Cases = round(100 * Cases_Excluded / Total_Excluded, 1)
+      Pct_Cases = ifelse(Total_Excluded > 0, round(100 * Cases_Excluded / Total_Excluded, 1), NA_real_)
     )
-  
-  kable(exclusion_breakdown, 
+
+  kable(exclusion_breakdown,
         caption = "Sample Exclusions by QC Stage and Case/Control Status",
         col.names = c("QC Stage", "Cases Excluded", "Controls Excluded", "Total Excluded", "% Cases"))
 }
@@ -962,16 +1135,27 @@ if (exists("start_cases")) {
 - **Total Excluded**: `r format(prefilter_total - final_variants, big.mark = ",")`
 
 ```{r exclusion-cascade}
-exclusion_data <- data.frame(
-  Stage = c("Starting", "Sex Check", "Missingness", "Heterozygosity", "Final"),
-  Samples = c(total_samples, passing_samples, passing_missingness, passing_het, final_samples)
-)
+if (exists("has_pca_outlier_qc") && has_pca_outlier_qc && !is.na(samples_after_pca_ancestry)) {
+  exclusion_data <- data.frame(
+    Stage = c("Starting", "Sex Check", "Missingness", "Heterozygosity", "Genotype build", "PC-adjusted PCA"),
+    Samples = c(
+      total_samples, passing_samples, passing_missingness, passing_het,
+      passing_het, samples_after_pca_ancestry
+    )
+  )
+} else {
+  exclusion_data <- data.frame(
+    Stage = c("Starting", "Sex Check", "Missingness", "Heterozygosity", "Final"),
+    Samples = c(total_samples, passing_samples, passing_missingness, passing_het, final_samples)
+  )
+}
 
 ggplot(exclusion_data, aes(x = factor(Stage, levels = Stage), y = Samples)) +
   geom_bar(stat = "identity", fill = "steelblue") +
   geom_text(aes(label = format(Samples, big.mark = ",")), vjust = -0.5) +
   labs(
     title = "Sample Retention Through QC Pipeline",
+    subtitle = if (exists("has_pca_outlier_qc") && has_pca_outlier_qc) "Last bar: samples remaining after PC4>0.3 (ancestry PCA only; genotype build count = previous bar)" else NULL,
     x = "QC Stage",
     y = "Number of Samples"
   ) +
@@ -983,14 +1167,44 @@ ggplot(exclusion_data, aes(x = factor(Stage, levels = Stage), y = Samples)) +
 
 # 8. Population Structure (PCA)
 
-PCA is computed on autosomes **excluding chromosome 8** (chr 1–7, 9–22) to avoid known structural effects. The same chr8-excluded eigenvectors are used for plots and downstream analysis.
+PCA is computed on autosomes **excluding chromosome 8** (chr 1–7, 9–22) to avoid known structural effects. The first PCA (`build_pca`) uses all samples in the genotype **build** (after het QC). When `identify_pca_outliers.R` runs, samples with **PC4 > 0.3** are written to `qc/exclusions/pca_outliers.txt` and PLINK recomputes PCA without them (`build_pca_clean.*`) for ancestry-style PCs. **Genotype data and `passing_samples` are not subset by that list** unless you change the pipeline.
 
-## Principal Components
+## PCA outlier filter (report)
+
+### How outliers are defined
+
+- **Rule:** samples with **raw PC4 > 0.3** in **`build_pca.eigenvec`** (PLINK2 `--pca` output; **not** a z-score on PC4).
+- **Implementation:** `identify_pca_outliers.R` (constants `PC_COL` / `PC_THRESHOLD` in that script; default **PC4** and **0.3**).
+- **Effect:** FID/IID rows are written to **`qc/exclusions/pca_outliers.txt`** for `plink2 --remove` when computing **`build_pca_clean`** only.
+
+```{r pca-outlier-summary-table, echo=FALSE}
+if (exists("has_pca_outlier_qc") && has_pca_outlier_qc) {
+  knitr::kable(pca_outlier_summary, caption = "PCA outlier step (qc/reports/pca_outlier_report.txt)")
+} else {
+  cat("No `qc/reports/pca_outlier_report.txt` found. Run Snakemake `identify_pca_outliers` (build_files) to generate it.\n")
+}
+```
+
+```{r pca-pipeline-static-plots, echo=FALSE, out.width="100%", fig.show="hold"}
+p_pca1 <- file.path(DATA_DIR, "qc/reports", "pca_outliers_pc1_pc2.png")
+p_pca4 <- file.path(DATA_DIR, "qc/reports", "pca_outliers_pc1_pc2_PC4.png")
+if (file.exists(p_pca1)) {
+  knitr::include_graphics(p_pca1)
+}
+if (file.exists(p_pca4)) {
+  knitr::include_graphics(p_pca4)
+}
+```
+
+The **build PCA** and **build_pca_clean** subsections use the **same figure types** (variance explained for PCs 1–10, PC1 vs PC2, PC1 vs PC2 by freeze when available, PC3 vs PC4, PC3 vs PC4 by freeze, scree for all 20 PCs). **Coordinates are not comparable** across the two PCAs because eigenvectors are recomputed after sample removal.
+
+## Principal Components (build PCA)
 
 ```{r pca-summary}
 # Calculate variance explained
-eigenval_file <- file.path(DATA_DIR, "preprocess", "build.eigenval")
-if (!file.exists(eigenval_file)) stop(paste("Required file not found:", eigenval_file))
+eigenval_file <- file.path(DATA_DIR, "preprocess", "build_pca.eigenval")
+if (!file.exists(eigenval_file)) eigenval_file <- file.path(DATA_DIR, "preprocess", "build.eigenval")
+if (!file.exists(eigenval_file)) stop(paste("Required file not found: preprocess/build_pca.eigenval or build.eigenval"))
 eigenval <- read.table(eigenval_file, header = FALSE)
 colnames(eigenval) <- "Eigenvalue"
 eigenval$PC <- paste0("PC", seq_len(nrow(eigenval)))
@@ -1042,13 +1256,16 @@ if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na
 ### PC3 vs PC4
 
 ```{r pca-plot-pc3-pc4, fig.height=6}
-ggplot(pca, aes(x = PC3, y = PC4, color = Status)) +
-  geom_point(alpha = 0.6) +
+pca$pca_hit <- ifelse(pca$PCA_outlier, "PC4 > 0.3", "Kept")
+ggplot(pca, aes(x = PC3, y = PC4, color = Status, shape = pca_hit)) +
+  geom_point(alpha = 0.65) +
+  geom_hline(yintercept = 0.3, linetype = "dashed", color = "gray40") +
   labs(
-    title = "Principal Component Analysis (PC3 vs PC4)",
+    title = "PC3 vs PC4 (dashed line: PC4 = 0.3 outlier threshold)",
     x = paste0("PC3 (", round(eigenval$Variance_Explained[3], 2), "%)"),
     y = paste0("PC4 (", round(eigenval$Variance_Explained[4], 2), "%)"),
-    color = "Status"
+    color = "Status",
+    shape = "PCA filter"
   ) +
   theme_minimal()
 ```
@@ -1075,6 +1292,117 @@ ggplot(eigenval, aes(x = seq_len(nrow(eigenval)), y = Eigenvalue)) +
   geom_point(color = "steelblue", size = 2) +
   labs(
     title = "Scree Plot: Eigenvalues of Principal Components",
+    x = "Principal Component",
+    y = "Eigenvalue"
+  ) +
+  theme_minimal()
+```
+
+## PCA after outlier removal (`build_pca_clean`)
+
+Same plot layout as **build PCA** above; axes use **`build_pca_clean.eigenval`** for variance labels. PCs are **re-fit** after excluding outliers, so numeric PC values are on a **new** scale (do not compare directly to `build_pca`).
+
+```{r pca-clean-eigenval, echo=FALSE}
+eigenval_clean_file <- file.path(DATA_DIR, "preprocess", "build_pca_clean.eigenval")
+has_eigenval_clean <- file.exists(eigenval_clean_file)
+if (has_eigenval_clean) {
+  eigenval_clean <- utils::read.table(eigenval_clean_file, header = FALSE, stringsAsFactors = FALSE)
+  colnames(eigenval_clean) <- "Eigenvalue"
+  eigenval_clean$PC <- paste0("PC", seq_len(nrow(eigenval_clean)))
+  eigenval_clean$Variance_Explained <- 100 * eigenval_clean$Eigenvalue / sum(eigenval_clean$Eigenvalue)
+} else {
+  eigenval_clean <- NULL
+}
+```
+
+### Variance explained (first 10 PCs)
+
+```{r pca-clean-variance-bars, fig.height=5, eval=exists("has_eigenval_clean") && has_eigenval_clean}
+ggplot(eigenval_clean[1:min(10L, nrow(eigenval_clean)), ], aes(x = factor(PC, levels = PC), y = Variance_Explained)) +
+  geom_bar(stat = "identity", fill = "darkseagreen") +
+  geom_text(aes(label = sprintf("%.2f%%", Variance_Explained)), vjust = -0.5) +
+  labs(
+    title = "Variance explained by principal components (build_pca_clean)",
+    x = "Principal Component",
+    y = "Variance Explained (%)"
+  ) +
+  theme_minimal()
+```
+
+### PC1 vs PC2
+
+```{r pca-clean-pc1-pc2, fig.height=6, eval=exists("pca_clean") && !is.null(pca_clean) && nrow(pca_clean) > 0}
+if ("Status" %in% names(pca_clean) && sum(!is.na(pca_clean$Status)) > 0) {
+  ggplot(pca_clean, aes(x = PC1, y = PC2, color = Status)) +
+    geom_point(alpha = 0.6) +
+    labs(
+      title = "PC1 vs PC2 (build_pca_clean)",
+      x = if (exists("has_eigenval_clean") && has_eigenval_clean) paste0("PC1 (", round(eigenval_clean$Variance_Explained[1], 2), "%)") else "PC1",
+      y = if (exists("has_eigenval_clean") && has_eigenval_clean) paste0("PC2 (", round(eigenval_clean$Variance_Explained[2], 2), "%)") else "PC2",
+      color = "Status"
+    ) +
+    theme_minimal()
+} else {
+  ggplot(pca_clean, aes(x = PC1, y = PC2)) +
+    geom_point(alpha = 0.6, color = "steelblue") +
+    labs(title = "PC1 vs PC2 (build_pca_clean)", x = "PC1", y = "PC2") +
+    theme_minimal()
+}
+```
+
+```{r pca-clean-pc1-pc2-freeze, fig.height=6, eval=exists("pca_clean") && !is.null(pca_clean) && nrow(pca_clean) > 0 && exists("has_freeze") && has_freeze && "Freeze" %in% names(pca_clean) && sum(!is.na(pca_clean$Freeze)) > 0}
+ggplot(pca_clean %>% dplyr::filter(!is.na(Freeze)), aes(x = PC1, y = PC2, color = factor(Freeze))) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "PC1 vs PC2 by Freeze (build_pca_clean)",
+    x = if (exists("has_eigenval_clean") && has_eigenval_clean) paste0("PC1 (", round(eigenval_clean$Variance_Explained[1], 2), "%)") else "PC1",
+    y = if (exists("has_eigenval_clean") && has_eigenval_clean) paste0("PC2 (", round(eigenval_clean$Variance_Explained[2], 2), "%)") else "PC2",
+    color = "Freeze"
+  ) +
+  theme_minimal()
+```
+
+### PC3 vs PC4
+
+```{r pca-clean-pc3-pc4, fig.height=6, eval=exists("pca_clean") && !is.null(pca_clean) && nrow(pca_clean) > 0 && exists("has_eigenval_clean") && has_eigenval_clean && nrow(eigenval_clean) >= 4L}
+if ("Status" %in% names(pca_clean) && sum(!is.na(pca_clean$Status)) > 0) {
+  ggplot(pca_clean, aes(x = PC3, y = PC4, color = Status)) +
+    geom_point(alpha = 0.6) +
+    labs(
+      title = "PC3 vs PC4 (build_pca_clean)",
+      x = paste0("PC3 (", round(eigenval_clean$Variance_Explained[3], 2), "%)"),
+      y = paste0("PC4 (", round(eigenval_clean$Variance_Explained[4], 2), "%)"),
+      color = "Status"
+    ) +
+    theme_minimal()
+} else {
+  ggplot(pca_clean, aes(x = PC3, y = PC4)) +
+    geom_point(alpha = 0.6, color = "steelblue") +
+    labs(title = "PC3 vs PC4 (build_pca_clean)", x = "PC3", y = "PC4") +
+    theme_minimal()
+}
+```
+
+```{r pca-clean-pc3-pc4-freeze, fig.height=6, eval=exists("pca_clean") && !is.null(pca_clean) && nrow(pca_clean) > 0 && exists("has_eigenval_clean") && has_eigenval_clean && nrow(eigenval_clean) >= 4L && exists("has_freeze") && has_freeze && "Freeze" %in% names(pca_clean) && sum(!is.na(pca_clean$Freeze)) > 0}
+ggplot(pca_clean %>% dplyr::filter(!is.na(Freeze)), aes(x = PC3, y = PC4, color = factor(Freeze))) +
+  geom_point(alpha = 0.6) +
+  labs(
+    title = "PC3 vs PC4 by Freeze (build_pca_clean)",
+    x = paste0("PC3 (", round(eigenval_clean$Variance_Explained[3], 2), "%)"),
+    y = paste0("PC4 (", round(eigenval_clean$Variance_Explained[4], 2), "%)"),
+    color = "Freeze"
+  ) +
+  theme_minimal()
+```
+
+### Scree plot (all 20 PCs)
+
+```{r pca-clean-scree, fig.height=5, eval=exists("has_eigenval_clean") && has_eigenval_clean && !is.null(eigenval_clean) && nrow(eigenval_clean) > 0}
+ggplot(eigenval_clean, aes(x = seq_len(nrow(eigenval_clean)), y = Eigenvalue)) +
+  geom_line(color = "darkseagreen", linewidth = 1) +
+  geom_point(color = "darkseagreen", size = 2) +
+  labs(
+    title = "Scree plot: eigenvalues (build_pca_clean)",
     x = "Principal Component",
     y = "Eigenvalue"
   ) +

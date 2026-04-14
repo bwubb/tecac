@@ -1,0 +1,184 @@
+---
+title: "Variant-level follow-up"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r libs}
+library(readr)
+library(dplyr)
+library(tibble)
+library(knitr)
+```
+
+```{r config}
+# Edit here only. No YAML params, no render(params=...). Snakemake GENES should match genes_to_report.
+data_dir <- "data/variant"
+genes_to_report <- c("CHEK2")
+genes_source_file <- "" # genes-from-file chunk: set path when eval=TRUE
+```
+
+```{r genes-from-file, eval=FALSE}
+# eval=TRUE: set genes_source_file in chunk config; table needs column Gene.
+if (!nzchar(genes_source_file)) {
+  stop("genes-from-file: set genes_source_file in chunk config")
+}
+if (!file.exists(genes_source_file)) {
+  stop("genes-from-file: file not found: ", genes_source_file)
+}
+pv_all <- read_csv(genes_source_file, show_col_types = FALSE)
+if (!"Gene" %in% names(pv_all)) {
+  stop("genes-from-file: input must contain a column named Gene")
+}
+genes_to_report <- sort(unique(as.character(pv_all$Gene[!is.na(pv_all$Gene) & nzchar(as.character(pv_all$Gene))])))
+if (!length(genes_to_report)) {
+  stop("genes-from-file: no non-empty Gene values in file")
+}
+```
+
+Brief: **Genes** and **`data_dir`** are set in chunk **`config`** only. Optional: **`genes-from-file`** with **`eval=TRUE`**. Subtables: **Overall**, **By STATUS**, **By FREEZE**, **By STATUS × FREEZE**.
+
+---
+
+```{r gene-loop, results='asis'}
+style_kable <- function(x, caption = NULL) {
+  k <- knitr::kable(x, caption = caption, row.names = FALSE)
+  if (requireNamespace("kableExtra", quietly = TRUE)) {
+    k <- kableExtra::kable_styling(
+      k,
+      bootstrap_options = c("striped", "hover", "condensed"),
+      full_width = FALSE,
+      position = "left"
+    )
+  }
+  k
+}
+
+read_gene_summary <- function(gene, variant_set) {
+  subdir <- data_dir
+  fname <- if (identical(variant_set, "pathogenic")) {
+    sprintf("variants-pathogenic-summary.%s.tsv", gene)
+  } else {
+    sprintf("variants-vus-summary.%s.tsv", gene)
+  }
+  path <- file.path(subdir, fname)
+  if (!file.exists(path)) {
+    return(tibble())
+  }
+  read_tsv(path, show_col_types = FALSE)
+}
+
+split_by_scope <- function(df) {
+  if (!nrow(df)) {
+    return(list(
+      overall = tibble(),
+      status = tibble(),
+      freeze = tibble(),
+      status_freeze = tibble()
+    ))
+  }
+  list(
+    overall = df %>% filter(scope == "overall"),
+    status = df %>% filter(scope == "status"),
+    freeze = df %>% filter(scope == "freeze"),
+    status_freeze = df %>% filter(scope == "status_freeze")
+  )
+}
+
+cols_summary <- c(
+  "variant_id", "variant_type", "status", "freeze",
+  "n_total", "n_called", "n_missing", "n_ref", "n_het", "n_hom", "call_rate"
+)
+
+for (g in genes_to_report) {
+  cat("\n\n")
+  cat("## ", g, "\n\n", sep = "")
+
+  for (vs_lab in c("pathogenic", "VUS")) {
+    vs_key <- if (vs_lab == "pathogenic") "pathogenic" else "vus"
+    sum_df <- read_gene_summary(g, vs_key)
+    sec_title <- if (vs_lab == "pathogenic") "Pathogenic" else "VUS"
+    cat("### ", sec_title, "\n\n", sep = "")
+    if (!nrow(sum_df)) {
+      miss_path <- file.path(
+        data_dir,
+        paste0("variants-", vs_key, "-summary.", g, ".tsv")
+      )
+      cat("_Missing summary file for ", vs_lab, " (expected: `", miss_path, "`)._ \n\n", sep = "")
+      next
+    }
+    if (all(c("variant_id", "variant_type") %in% names(sum_df))) {
+      cat("#### Variants in this file\n\n")
+      id_tbl <- sum_df %>%
+        distinct(variant_id, variant_type) %>%
+        arrange(variant_id)
+      print(style_kable(
+        id_tbl,
+        caption = paste0(g, " — ", vs_lab, " — variant IDs in summary TSV")
+      ))
+      cat("\n\n")
+    }
+    parts <- split_by_scope(sum_df)
+    cat("#### Overall\n\n")
+    if (nrow(parts$overall)) {
+      print(style_kable(
+        parts$overall %>% select(any_of(cols_summary)),
+        caption = paste0(g, " — ", vs_lab, " — overall")
+      ))
+    } else {
+      cat("_No overall rows._\n\n")
+    }
+    cat("\n\n#### By STATUS\n\n")
+    if (nrow(parts$status)) {
+      print(style_kable(
+        parts$status %>% select(any_of(cols_summary)),
+        caption = paste0(g, " — ", vs_lab, " — by STATUS")
+      ))
+    } else {
+      cat("_No status-stratified rows._\n\n")
+    }
+    cat("\n\n#### By FREEZE\n\n")
+    if (nrow(parts$freeze)) {
+      print(style_kable(
+        parts$freeze %>% select(any_of(cols_summary)),
+        caption = paste0(g, " — ", vs_lab, " — by FREEZE")
+      ))
+    } else {
+      cat("_No freeze-stratified rows._\n\n")
+    }
+    cat("\n\n#### By STATUS × FREEZE\n\n")
+    if (nrow(parts$status_freeze)) {
+      print(style_kable(
+        parts$status_freeze %>% select(any_of(cols_summary)),
+        caption = paste0(g, " — ", vs_lab, " — by STATUS and FREEZE")
+      ))
+    } else {
+      cat("_No STATUS×FREEZE rows._\n\n")
+    }
+    cat("\n\n")
+  }
+
+  cat(
+    "<!-- Plots / tests (e.g. carrier rates by STATUS, FREEZE, interaction): add chunks below for ",
+    g,
+    " -->\n\n",
+    sep = ""
+  )
+}
+```
+
+---
+
+# Notes
+
+- **Gene list:** `genes_to_report` in chunk `config` (keep in sync with Snakemake `GENES`). Or `genes-from-file` with `eval=TRUE` and `genes_source_file` set in `config`.
+- **Comparisons:** pathogenic vs VUS are separate summary files; within each, strata are **control/case** (from STATUS), **FREEZE**, and both. Formal tests can use `n_ref` / `n_het` / `n_hom` / `n_missing`.
+- **Inputs:** `data_dir` in chunk `config` — `variants-pathogenic-summary.{GENE}.tsv`, `variants-vus-summary.{GENE}.tsv`.

@@ -6,6 +6,7 @@ import vcfpy
 
 PROGRESS_INTERVAL=1000
 READ_PROGRESS_INTERVAL=10000
+MAX_BUFFER_RECORDS=50000
 
 def norm_chrom(c):
     if (c or '').lower().startswith('chr'):
@@ -39,8 +40,10 @@ def main():
     ap=argparse.ArgumentParser(description='Apply MNP GT plan: set pair GTs to 0/0 in carriers, add MNP record.')
     ap.add_argument('-p','--plan',required=True,help='GT plan file (from plan_mnp_gt.py)')
     ap.add_argument('-i','--input',required=True,help='Input VCF')
-    ap.add_argument('-o','--output',required=True,help='Output VCF')
+    ap.add_argument('-o','--output',required=True,help='Output VCF (use - for stdout, e.g. pipe to bgzip)')
     args=ap.parse_args()
+    if args.output=='-':
+        args.output='/dev/stdout'
 
     id_to_pair,pair_to_info=load_plan(args.plan)
     n_mnps=len(pair_to_info)
@@ -62,6 +65,31 @@ def main():
         if n_written==1 or n_written%PROGRESS_INTERVAL==0:
             print(f"  ... {n_written} written",file=sys.stderr)
 
+    def flush_buffer_emittable():
+        nonlocal buffer,insert_after
+        if len(buffer)<=MAX_BUFFER_RECORDS:
+            return
+        sorted_idx=sorted(range(len(buffer)),key=lambda i:(buffer[i][0],len(buffer[i][1].REF)))
+        to_remove=set()
+        for i in sorted_idx:
+            if len(buffer)-len(to_remove)<=MAX_BUFFER_RECORDS//2:
+                break
+            if buffer[i][2]:
+                continue
+            to_remove.add(i)
+        if not to_remove:
+            return
+        for i in sorted_idx:
+            if i not in to_remove:
+                continue
+            _,rec,_=buffer[i]
+            write_rec(rec)
+        new_buffer=[x for i,x in enumerate(buffer) if i not in to_remove]
+        for k in list(insert_after):
+            old=insert_after[k]
+            insert_after[k]=old-sum(1 for j in to_remove if j<old)
+        buffer[:]=new_buffer
+
     for record in reader:
         n_read+=1
         if n_read%READ_PROGRESS_INTERVAL==0:
@@ -70,7 +98,7 @@ def main():
         if chrom_norm!=cur_chrom:
             if buffer:
                 buffer.sort(key=lambda x:(x[0],len(x[1].REF)))
-                for _pos,rec in buffer:
+                for _pos,rec,_ in buffer:
                     write_rec(rec)
                 buffer.clear()
                 id1_gt_store.clear()
@@ -85,7 +113,8 @@ def main():
             if not buffer:
                 write_rec(record)
             else:
-                buffer.append((record.POS,record))
+                buffer.append((record.POS,record,False))
+                flush_buffer_emittable()
             continue
 
         id1,id2=pair
@@ -97,7 +126,7 @@ def main():
                 if call.sample in carriers:
                     call.set_genotype('0/0')
             id1_gt_store[pair]={c.sample:(c.data.get('GT') or './.') for c in record.calls}
-            buffer.append((record.POS,record))
+            buffer.append((record.POS,record,True))
             insert_after[pair]=len(buffer)-1
             continue
 
@@ -110,7 +139,8 @@ def main():
                 if not buffer:
                     write_rec(record)
                 else:
-                    buffer.append((record.POS,record))
+                    buffer.append((record.POS,record,False))
+                    flush_buffer_emittable()
                 id1_gt_store.pop(pair,None)
                 continue
 
@@ -144,8 +174,8 @@ def main():
                 FORMAT=['GT'],
                 calls=mnp_calls
             )
-            buffer.insert(idx+1,(info['pos'],mnp_record))
-            buffer.append((record.POS,record))
+            buffer.insert(idx+1,(info['pos'],mnp_record,False))
+            buffer.append((record.POS,record,False))
 
             def is_id1(rec):
                 ids=list(rec.ID) if rec.ID else []
@@ -159,7 +189,7 @@ def main():
                     block.append(buffer[i])
             block.append(buffer[-1])
             block.sort(key=lambda x:(x[0],len(x[1].REF)))
-            for _pos,rec in block:
+            for _pos,rec,_ in block:
                 write_rec(rec)
             emitted_idx={idx,idx+1,len(buffer)-1}
             for i in range(idx+2,len(buffer)-1):
@@ -174,13 +204,15 @@ def main():
                     old=insert_after[k]
                     insert_after[k]=old-sum(1 for j in emitted_idx if j<old)
             id1_gt_store.pop(pair,None)
+            flush_buffer_emittable()
             continue
 
-        buffer.append((record.POS,record))
+        buffer.append((record.POS,record,False))
+        flush_buffer_emittable()
 
     if buffer:
         buffer.sort(key=lambda x:(x[0],len(x[1].REF)))
-        for _pos,rec in buffer:
+        for _pos,rec,_ in buffer:
             write_rec(rec)
     print(f"Done. {n_written} records written.",file=sys.stderr)
     reader.close()

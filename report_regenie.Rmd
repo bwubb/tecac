@@ -5,6 +5,7 @@ output:
   html_document:
     theme: paper
     toc: true
+    toc_depth: 2
     toc_float: true
     code_folding: hide
 date: "`r Sys.Date()`"
@@ -12,15 +13,24 @@ params:
   project_name: "TECAC_WES"
 ---
 
-**Note:** This report is configured for Exome-Wide Association Studies (ExWAS) using Regenie burden and single-variant results.
+```{=html}
+<div style="border:1px solid #ccc; border-left:4px solid #2E86AB; padding:12px 14px; margin:1rem 0; background:#fafafa;">
+<strong>How to read this report</strong>
+<ul style="margin-bottom:0;">
+<li><strong>Burden-style interpretation</strong> (effect direction, OR, volcano, CHEK2, directional gene lists) uses <code>TEST == &quot;ADD&quot;</code> only.</li>
+<li>An <strong>all-tests</strong> export includes <code>ADD</code>, <code>ADD-SKAT</code>, <code>ADD-SKATO</code>, … for archive and downstream meta-analysis.</li>
+<li><strong>Gene-based FDR</strong> (<code>PVAL_ADJ</code>) is Benjamini–Hochberg across <em>all</em> gene-based rows (every TEST × gene × mask × threshold), not within each TEST.</li>
+</ul>
+</div>
+```
 
 <!-- 
 NOTES TO SELF:
 - M1 = pathogenic variants only (LoF level 1)
 - M2 = VUS variants only (LoF level 2) 
 - M3 = pathogenic + VUS variants combined
-- ADD = additive burden test (use for BETA interpretation)
-- SKAT/SKATO = other burden tests (not used in this report)
+- ADD = additive burden test (BETA/SE/OR and directional interpretation apply here only)
+- ADD-SKAT / ADD-SKATO = variance-component tests (`TEST` in REGENIE; p-values preserved in full export; not interpreted via BETA/OR in this report)
 - Exome-wide significance = p < 2.5e-6 (not GWAS 5e-8)
 - Lambda GC less interpretable in ExWAS due to sparse rare variants
 
@@ -32,6 +42,7 @@ KEY TERMS:
   * High SE = less confidence in BETA (common for rare variants)
 - PVAL/LOG10P: p-value from association test
   * LOG10P = -log10(p-value) for plotting
+  * Plots cap extreme -log10(p) at 100 where needed; CSVs keep raw LOG10P
   * Smaller p-values (larger LOG10P) = stronger evidence
 - PVAL_ADJ/FDR: False discovery rate-adjusted p-values (Benjamini-Hochberg)
   * Controls for multiple testing across thousands of variants/genes
@@ -52,83 +63,7 @@ library(qqman)
 library(DiagrammeR)
 
 # Set consistent theme
-theme_set(theme_minimal(base_size = 12))
-```
-
-# REGENIE ExWAS Pipeline Flowchart
-
-```{r regenie_flowchart, echo=FALSE, fig.cap="REGENIE Exome-Wide Association Pipeline"}
-grViz("
-digraph regenie_pipeline {
-
-  # Global settings
-  graph [rankdir = TB, fontsize = 12, fontname = Helvetica]
-  node [fontname = Helvetica, fontsize = 11, shape = box, style = filled, color = DarkBlue]
-
-  # Input nodes
-  input_vcf [label = 'Multi-chromosome VCF\\nfiles', fillcolor = Khaki, fontcolor = Black, shape = folder]
-  samples [label = 'Sample list', fillcolor = Khaki, fontcolor = Black, shape = note]
-  pheno [label = 'Phenotypes', fillcolor = Khaki, fontcolor = Black, shape = note]
-  covar [label = 'Covariates', fillcolor = Khaki, fontcolor = Black, shape = note]
-
-  # Processing nodes
-  preprocess [label = 'VCF Preprocessing\\n(normalize, filter, QC)', fillcolor = LightSkyBlue]
-  pgen_convert [label = 'Convert to PLINK2\\nPGEN format', fillcolor = LightSkyBlue]
-
-  # Step 1 nodes
-  step1_chr1 [label = 'Step 1\\nChr 1\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
-  step1_chr_ellipsis [label = '...', fillcolor = LavenderBlush, shape = parallelogram]
-  step1_chr22 [label = 'Step 1\\nChr 22\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
-
-  merge_step1 [label = 'Merge Step 1\\nresults', fillcolor = MistyRose, shape = diamond]
-
-  # Step 2 nodes
-  step2_single [label = 'Step 2 Single-Variant\\nAssociation Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
-  step2_gene [label = 'Step 2 Gene-Based\\nBurden Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
-
-  # Annotation and output
-  vep_annotate [label = 'VEP Annotation\\n(pathogenic/VUS variants)', fillcolor = LemonChiffon]
-  report_gen [label = 'Generate HTML Report\\n(statistics, plots, tables)', fillcolor = AliceBlue, shape = note]
-
-  # Connections
-  input_vcf -> preprocess
-  samples -> preprocess
-  preprocess -> pgen_convert
-  preprocess -> vep_annotate
-
-  pgen_convert -> step1_chr1
-  pgen_convert -> step1_chr_ellipsis
-  pgen_convert -> step1_chr22
-
-  step1_chr1 -> merge_step1 [style = dotted]
-  step1_chr_ellipsis -> merge_step1 [style = dotted]
-  step1_chr22 -> merge_step1 [style = dotted]
-
-  merge_step1 -> step2_single
-  merge_step1 -> step2_gene
-  vep_annotate -> step2_gene
-
-  step2_single -> report_gen
-  step2_gene -> report_gen
-
-  # Invisible edges for layout
-  {rank = same; step1_chr1; step1_chr_ellipsis; step1_chr22}
-  {rank = same; step2_single; step2_gene}
-
-  # Subgraph for parallel processing
-  subgraph cluster_parallel {
-    label = 'Parallel Processing\\n(Chromosome-level)'
-    fontsize = 14
-    style = filled
-    fillcolor = WhiteSmoke
-    step1_chr1
-    step1_chr_ellipsis
-    step1_chr22
-    step2_single
-    step2_gene
-  }
-}
-")
+theme_set(theme_minimal(base_size = 13))
 ```
 
 ```{r load-data,echo=FALSE,message=FALSE,warning=FALSE}
@@ -187,42 +122,46 @@ for(i in 1:22) {
   }
 }
 
-# Combine all gene-based data
-gene_based <- bind_rows(gene_based_list) %>%
+# Combine all gene-based rows (all TEST types: ADD, ADD-SKAT, ADD-SKATO, …) — do not filter here
+gene_based_all <- bind_rows(gene_based_list) %>%
   mutate(across(c(CHROM, GENPOS, N, N_CASES, N_CONTROLS), as.integer),
          across(c(A1FREQ, A1FREQ_CASES, A1FREQ_CONTROLS, BETA, SE, CHISQ, LOG10P), as.numeric)) %>%
   mutate(CHROM = as.factor(CHROM),
-         PVAL = 10^(-LOG10P),
-         PVAL_ADJ = p.adjust(PVAL, method = "BH"),
-         LOG10P_ADJ = -log10(PVAL_ADJ),
-         OR = exp(BETA))
+         PVAL = 10^(-LOG10P)) %>%
+  mutate(
+    PVAL_ADJ = p.adjust(PVAL, method = "BH"),
+    LOG10P_ADJ = -log10(PVAL_ADJ)
+  ) %>%
+  # OR only meaningful for additive burden (ADD); leave NA for ADD-SKAT / ADD-SKATO etc.
+  mutate(OR = if_else(TEST == "ADD" & is.finite(BETA), exp(BETA), NA_real_))
 
-# Data quality check
-if(any(is.na(gene_based$LOG10P))) {
-  warning(sprintf("Warning: %d gene-based tests have NA LOG10P values", sum(is.na(gene_based$LOG10P))))
+# Data quality check (all tests)
+if(any(is.na(gene_based_all$LOG10P))) {
+  warning(sprintf("Warning: %d gene-based tests have NA LOG10P values", sum(is.na(gene_based_all$LOG10P))))
 }
-if(any(is.infinite(gene_based$LOG10P))) {
-  warning(sprintf("Warning: %d gene-based tests have infinite LOG10P values (p=0)", sum(is.infinite(gene_based$LOG10P))))
+if(any(is.infinite(gene_based_all$LOG10P))) {
+  warning(sprintf("Warning: %d gene-based tests have infinite LOG10P values (p=0)", sum(is.infinite(gene_based_all$LOG10P))))
 }
-# BETA should be log-OR (typically between about -5 and 5). If not, column alignment may be wrong.
-if("BETA" %in% names(gene_based) && any(abs(gene_based$BETA) > 20, na.rm = TRUE)) {
-  warning("Some gene-based BETA values are very large (|BETA| > 20). Check that Regenie output column order matches expected (CHROM GENPOS ... BETA SE LOG10P).")
+add_beta <- gene_based_all$BETA[gene_based_all$TEST == "ADD"]
+if(length(add_beta) && any(is.finite(add_beta) & abs(add_beta) > 20)) {
+  warning("Some ADD burden BETA values are very large (|BETA| > 20). Check Regenie column alignment (CHROM GENPOS ... BETA SE LOG10P).")
 }
 
-gene_based <- gene_based %>%
-  # Extract gene and mask information from ID column
+gene_based_all <- gene_based_all %>%
   mutate(
     GENE = sub("\\..*", "", ID),
     MASK = sub(".*\\.(M[0-9]+).*", "\\1", ID),
-    THRESH_RAW = sub(".*\\.(.*)$", "\\1", ID),  # Extract everything after last dot
-    THRESH = ifelse(grepl("^\\d+\\.\\d+$", THRESH_RAW), as.numeric(THRESH_RAW),
-                   ifelse(THRESH_RAW == "all", "All variants", THRESH_RAW))
-  ) %>%
-  # Filter to ADD test only for BETA-based analysis
-  filter(TEST == "ADD")
+    THRESH_RAW = sub(".*\\.(.*)$", "\\1", ID),
+    THRESH = as.character(ifelse(THRESH_RAW == "all", "All variants", THRESH_RAW))
+  )
+
+# Burden (ADD) only: used for BETA/OR, directional language, volcano, mask summaries (mean beta), CHEK2 burden
+gene_based_add <- gene_based_all %>% filter(TEST == "ADD")
 ```
 
-## Analysis Summary
+## Summary and quality
+
+### Analysis summary
 
 ```{r summary-stats,echo=FALSE,message=FALSE,warning=FALSE}
 # Load phenotype file for actual case/control numbers
@@ -233,55 +172,60 @@ pheno <- read_delim(pheno_file, delim = " ", col_names = TRUE, trim_ws = TRUE)
 summary_df <- data.frame(
   Metric = c("Total Samples", "Cases", "Controls",
              "Variants Tested (Single-Variant)",
-             "Genes Tested (Burden Test)"),
+             "Unique genes tested (all TEST rows)",
+             "Unique genes tested (ADD only)"),
   Count = c(
     length(unique(pheno$IID)),
     sum(pheno$STATUS == 1),
     sum(pheno$STATUS == 0),
     nrow(single_variant),
-    length(unique(gene_based$GENE))  # important: gene count, not row count
+    length(unique(gene_based_all$GENE)),
+    length(unique(gene_based_add$GENE))
   )
 )
 
 kable(summary_df, format = "html", col.names = c("Metric", "Count")) %>%
-  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
   column_spec(1, bold = TRUE)
 ```
 
-## Quality Metrics
+### Quality metrics
 
 ```{r quality-metrics,echo=FALSE,message=FALSE,warning=FALSE}
 # Calculate lambda GC for both analyses
 single_lambda <- median(qchisq(1 - single_variant$PVAL, 1), na.rm = TRUE) / qchisq(0.5, 1)
-gene_lambda <- median(qchisq(1 - gene_based$PVAL, 1), na.rm = TRUE) / qchisq(0.5, 1)
+gene_lambda <- median(qchisq(1 - gene_based_add$PVAL, 1), na.rm = TRUE) / qchisq(0.5, 1)
 
-# Simple quality metrics
+# Simple quality metrics (burden ADD only for gene-based rows)
+sig_add_or <- gene_based_add$OR[gene_based_add$PVAL_ADJ < 0.05 & is.finite(gene_based_add$OR)]
+max_or_sig <- if (length(sig_add_or)) round(max(sig_add_or, na.rm = TRUE), 2) else NA_real_
+
 quality_df <- data.frame(
     Metric = c(
         "Significant Single-Variants (p < 2.5e-6)",
-        "Significant Gene-Based (FDR < 0.05)",
+        "Significant Burden Tests (ADD, FDR < 0.05)",
         "Lambda GC (Single-Variant)",
-        "Lambda GC (Gene-Based)",
-        "Max Effect Size (Gene-Based OR)"
+        "Lambda GC (gene-based ADD only)",
+        "Max OR (FDR-significant ADD only)"
     ),
     Value = c(
         format(sum(single_variant$LOG10P > 5.60206, na.rm = TRUE), big.mark = ","),
-        format(sum(gene_based$PVAL_ADJ < 0.05, na.rm = TRUE), big.mark = ","),
+        format(sum(gene_based_add$PVAL_ADJ < 0.05, na.rm = TRUE), big.mark = ","),
         round(single_lambda, 3),
         round(gene_lambda, 3),
-        round(max(exp(gene_based$BETA[gene_based$PVAL_ADJ < 0.05]), na.rm = TRUE), 2)
+        ifelse(is.finite(max_or_sig), format(max_or_sig, nsmall = 2), "—")
     )
 )
 
 kable(quality_df, format = "html",
       col.names = c("Quality Metric", "Value")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
     column_spec(1, bold = TRUE)
 ```
 
-## Single-Variant Exome Association Results
+## Single-variant results
 
-### Significant Variants (p < 2.5e-6)
+### Significant variants
 
 ```{r significant-single,echo=FALSE,message=FALSE,warning=FALSE}
 # Filter significant variants and join with pathogenic/VUS annotations
@@ -294,7 +238,7 @@ if(!is.null(pathogenic_annotations) && nrow(pathogenic_annotations) > 0) {
   significant_pathogenic <- significant_variants %>%
     inner_join(pathogenic_annotations, by = "ID") %>%
     select(CHROM, GENPOS, Gene, Variant.LoF_level, HGVSc, HGVSp, A1FREQ, OR, PVAL, PVAL_ADJ) %>%
-    arrange(desc(PVAL))  # Sort by significance
+    arrange(PVAL)  # Strongest evidence first (smallest p)
 
   if(nrow(significant_pathogenic) > 0) {
     # Display all significant pathogenic/VUS variants (should be small number)
@@ -311,7 +255,7 @@ if(!is.null(pathogenic_annotations) && nrow(pathogenic_annotations) > 0) {
           format = "html", digits = 4,
           col.names = c("Chr:Pos", "Gene", "LoF Level", "HGVSc", "HGVSp", "Alt Freq", "OR", "P-value", "FDR P-value")) %>%
         kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
-                      font_size = 11) %>%
+                      font_size = 13) %>%
         column_spec(1, bold = TRUE, width = "80px") %>%
         column_spec(8:9, color = "red") %>%
         scroll_box(width = "100%", height = "400px")
@@ -330,7 +274,7 @@ if(!is.null(pathogenic_annotations) && nrow(pathogenic_annotations) > 0) {
         format = "html", digits = 4,
         col.names = c("Variant (chr:pos ref>alt)", "Alt Freq", "OR", "P-value", "FDR P-value")) %>%
       kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
-                    font_size = 12) %>%
+                    font_size = 13) %>%
       column_spec(1, bold = TRUE, width = "250px") %>%
       column_spec(4:5, color = "red") %>%
       scroll_box(width = "100%", height = "400px")
@@ -341,30 +285,28 @@ if(!is.null(pathogenic_annotations) && nrow(pathogenic_annotations) > 0) {
 }
 ```
 
-### Manhattan Plot
+### Manhattan plot
 
-```{r manhattan-plot,echo=FALSE,message=FALSE,warning=FALSE}
-# Manhattan Plot with improved styling
+```{r manhattan-plot,echo=FALSE,message=FALSE,warning=FALSE, fig.cap="Single-variant Manhattan (y capped for display)."}
 chrom_colors <- rep(c("#2E86AB", "#FF6B35"), length.out = length(unique(single_variant$CHROM)))
+hi <- max(single_variant$LOG10P, na.rm = TRUE)
+if (!is.finite(hi)) hi <- 10
+ylim_u <- min(80, hi + 2)
 
 manhattan_plot <- ggplot(single_variant, aes(x = POS_INDEX, y = LOG10P, color = CHROM)) +
-    geom_point(alpha = 0.7, size = 0.8) +
+    geom_point(alpha = 0.55, size = 1.35) +
     scale_color_manual(values = chrom_colors) +
-    labs(title = "Manhattan Plot: Single-Variant Exome Association",
-         subtitle = paste("Total variants:", nrow(single_variant), "| Exome-wide significance threshold: p < 2.5e-6"),
-         x = "Genomic Position", y = "-log10(p-value)") +
-    geom_hline(yintercept = 5.602, color = "red", linetype = "dashed", size = 0.8) +
-    theme(legend.position = "none",
-          plot.title = element_text(size = 14, face = "bold"),
-          plot.subtitle = element_text(size = 10, color = "gray50"))
+    labs(x = "Genomic position", y = expression(-log[10](italic(p)))) +
+    geom_hline(yintercept = 5.602, color = "red", linetype = "dashed", linewidth = 0.6) +
+    coord_cartesian(ylim = c(0, ylim_u)) +
+    theme(legend.position = "none")
 
 print(manhattan_plot)
 ```
 
-### QQ Plot
+### QQ plot
 
-```{r qq-plot,echo=FALSE,message=FALSE,warning=FALSE}
-# QQ Plot for single variant p-values
+```{r qq-plot,echo=FALSE,message=FALSE,warning=FALSE, fig.cap="Single-variant QQ."}
 qq_data <- single_variant %>%
     filter(!is.na(LOG10P)) %>%
     arrange(desc(LOG10P)) %>%
@@ -373,72 +315,56 @@ qq_data <- single_variant %>%
         expected = sort(-log10(ppoints(length(LOG10P))), decreasing = TRUE)
     )
 
-# Verify p-values are valid for lambda calculation
-pval_check <- all(single_variant$PVAL > 0 & single_variant$PVAL <= 1, na.rm = TRUE)
-cat("P-value validation: All p-values in valid range (0,1] =", pval_check, "\n")
-
-# Calculate lambda GC
-chisq <- qchisq(1 - single_variant$PVAL, 1)
-lambda_gc <- median(chisq, na.rm = TRUE) / qchisq(0.5, 1)
-
-cat("Lambda GC:", round(lambda_gc, 3), "\n")
-cat("Interpretation: λ < 1.0 indicates deflation (conservative test statistics)\n")
-cat("Possible causes: REGENIE over-correction, QC filtering, or case-control imbalance\n\n")
-
 qq_plot <- ggplot(qq_data, aes(x = expected, y = observed)) +
-    geom_point(alpha = 0.6, color = "#2E86AB") +
+    geom_point(alpha = 0.55, color = "#2E86AB") +
     geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-    # Add deflation demonstration line (lambda = 0.8 would be flatter)
-    geom_abline(intercept = 0, slope = lambda_gc, color = "blue", linetype = "dotted", alpha = 0.7) +
-    labs(title = "Q-Q Plot: Single-Variant P-values",
-         subtitle = paste("Lambda GC:", round(lambda_gc, 3), "| Deflation (λ < 1.0) indicates test statistics are less significant than expected"),
-         x = "Expected -log10(p-value)",
-         y = "Observed -log10(p-value)") +
-    theme(plot.title = element_text(size = 14, face = "bold"),
-          plot.subtitle = element_text(size = 10, color = "gray50"))
+    labs(x = "Expected -log10(p)", y = "Observed -log10(p)")
 
 print(qq_plot)
 ```
 
-## Gene-Based Burden Testing Results
+Deviation from the diagonal at the tail reflects excess signal; genome-wide λ for single-variant tests is in **Quality metrics** above.
 
-### Summary by Mask
+## Gene-based results
+
+Exports use explicit names: **`r paste0(params$project_name, "_gene_based_results_alltests_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (all `TEST` values), **`r paste0(params$project_name, "_gene_based_results_ADDonly_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (ADD only), and **`r paste0(params$project_name, "_gene_based_meta_input_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (columns used for cross-freeze meta). Use **all-tests** for archive/SKAT/SKATO; **meta_input** matches downstream meta pipelines.
+
+### Burden (ADD) — summary by mask
 
 ```{r mask-summary,echo=FALSE,message=FALSE,warning=FALSE}
-# Summary statistics per mask
-mask_summary <- gene_based %>%
+mask_summary <- gene_based_add %>%
   group_by(MASK) %>%
   summarize(
-    Genes_Tested = n(),
-    Significant_Genes = sum(PVAL_ADJ < 0.05, na.rm = TRUE),
+    Tests = n(),
+    Significant_Tests = sum(PVAL_ADJ < 0.05, na.rm = TRUE),
     Most_Significant_Gene = GENE[which.max(LOG10P)],
-    Max_Log10P = max(LOG10P, na.rm = TRUE),
+    Max_Log10P = max(pmin(LOG10P, 100), na.rm = TRUE),
     Mean_Beta = mean(BETA, na.rm = TRUE)
   ) %>%
-  mutate(Significance_Rate = Significant_Genes / Genes_Tested * 100)
+  mutate(Significance_Rate = Significant_Tests / Tests * 100)
 
 kable(mask_summary, format = "html", digits = 3,
-      col.names = c("Mask", "Genes Tested", "FDR Significant", "Top Gene", "Max -log10(P)", "Mean Beta", "Significance Rate (%)")) %>%
-  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+      col.names = c("Mask", "Tests (gene×mask×threshold)", "FDR significant tests", "Top Gene", "Max −log10(P) (display cap 100)", "Mean Beta", "Significance Rate (%)")) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
   column_spec(1, bold = TRUE)
 ```
 
-### Top Genes by Clinical Category
+### Top genes by clinical category (burden ADD only)
 
 #### M1 (Pathogenic variants only)
 
 ```{r top-genes-m1,echo=FALSE,message=FALSE,warning=FALSE}
 # M1 (Pathogenic) - Top 10 genes
-m1_top <- gene_based %>%
+m1_top <- gene_based_add %>%
   filter(MASK == "M1") %>%
-  slice_max(LOG10P, n = 10) %>%
+  slice_max(LOG10P, n = 10, with_ties = FALSE) %>%
   select(GENE, THRESH, BETA, SE, LOG10P, PVAL, PVAL_ADJ, OR) %>%
   arrange(desc(LOG10P))
 
 if(nrow(m1_top) > 0) {
   kable(m1_top, format = "html", digits = 4,
         col.names = c("Gene", "MAF Filter", "Beta", "SE", "-log10(P)", "P-value", "FDR P-value", "OR")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
     column_spec(1, bold = TRUE) %>%
     column_spec(c(3, 5, 6), color = "red")
 } else {
@@ -450,16 +376,16 @@ if(nrow(m1_top) > 0) {
 
 ```{r top-genes-m2,echo=FALSE,message=FALSE,warning=FALSE}
 # M2 (VUS) - Top 10 genes
-m2_top <- gene_based %>%
+m2_top <- gene_based_add %>%
   filter(MASK == "M2") %>%
-  slice_max(LOG10P, n = 10) %>%
+  slice_max(LOG10P, n = 10, with_ties = FALSE) %>%
   select(GENE, THRESH, BETA, SE, LOG10P, PVAL, PVAL_ADJ, OR) %>%
   arrange(desc(LOG10P))
 
 if(nrow(m2_top) > 0) {
   kable(m2_top, format = "html", digits = 4,
         col.names = c("Gene", "MAF Filter", "Beta", "SE", "-log10(P)", "P-value", "FDR P-value", "OR")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
     column_spec(1, bold = TRUE) %>%
     column_spec(c(3, 5, 6), color = "red")
 } else {
@@ -471,16 +397,16 @@ if(nrow(m2_top) > 0) {
 
 ```{r top-genes-m3,echo=FALSE,message=FALSE,warning=FALSE}
 # M3 (Pathogenic + VUS) - Top 10 genes
-m3_top <- gene_based %>%
+m3_top <- gene_based_add %>%
   filter(MASK == "M3") %>%
-  slice_max(LOG10P, n = 10) %>%
+  slice_max(LOG10P, n = 10, with_ties = FALSE) %>%
   select(GENE, THRESH, BETA, SE, LOG10P, PVAL, PVAL_ADJ, OR) %>%
   arrange(desc(LOG10P))
 
 if(nrow(m3_top) > 0) {
   kable(m3_top, format = "html", digits = 4,
         col.names = c("Gene", "MAF Filter", "Beta", "SE", "-log10(P)", "P-value", "FDR P-value", "OR")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
     column_spec(1, bold = TRUE) %>%
     column_spec(c(3, 5, 6), color = "red")
 } else {
@@ -488,32 +414,29 @@ if(nrow(m3_top) > 0) {
 }
 ```
 
-### Suggestive Gene-Based Associations (Raw p < 0.001, FDR ≥ 0.05)
+### Suggestive ADD burden signals
+
+_Exploratory table: strong raw p but not FDR-significant after genome-wide BH across all gene-based tests._
 
 ```{r suggestive-genes,echo=FALSE,message=FALSE,warning=FALSE}
-# Show genes with strong raw associations but don't meet FDR significance
-# These are "near misses" - promising candidates that need more evidence
-
-# Get genes that are in top 10 by raw p-value per mask but don't meet FDR threshold
-top_by_raw_p <- gene_based %>%
+top_by_raw_p <- gene_based_add %>%
   group_by(MASK) %>%
-  slice_max(LOG10P, n = 10) %>%
+  slice_max(LOG10P, n = 10, with_ties = FALSE) %>%
   ungroup()
 
-# Filter to suggestive associations: strong raw p (< 0.001) but not FDR significant
 suggestive_genes <- top_by_raw_p %>%
-  filter(LOG10P > 3, PVAL_ADJ >= 0.05) %>%  # Raw p < 0.001, FDR >= 0.05
-  arrange(PVAL) %>%  # Sort by raw p-value strength
-  slice_head(n = 15) %>%  # Show top 15 suggestive associations
+  filter(LOG10P > 3, PVAL_ADJ >= 0.05) %>%
+  arrange(PVAL) %>%
+  slice_head(n = 15) %>%
   select(GENE, MASK, THRESH, BETA, LOG10P, PVAL, PVAL_ADJ, OR)
 
 if(nrow(suggestive_genes) > 0) {
-    cat("**Genes with strong evidence (raw p < 0.001) but not FDR significant after multiple testing correction**\n\n")
     kable(suggestive_genes,
           format = "html", digits = 4,
+          caption = "Suggestive ADD burden signals (exploratory)",
           col.names = c("Gene", "Mask", "MAF Filter", "Beta", "Raw -log10(P)", "Raw P-value", "FDR P-value", "OR")) %>%
         kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
-                      font_size = 11) %>%
+                      font_size = 13) %>%
         column_spec(1, bold = TRUE) %>%
         column_spec(c(4, 8), color = "orange")
 } else {
@@ -521,131 +444,158 @@ if(nrow(suggestive_genes) > 0) {
 }
 ```
 
-### Volcano Plot by Mask
+### Volcano (ADD)
 
-```{r volcano-plot,echo=FALSE,message=FALSE,warning=FALSE}
-# Volcano Plot with FDR significance, faceted by mask
-gene_based_plot <- gene_based %>%
-  mutate(Significant = PVAL_ADJ < 0.05)
+```{r volcano-plot,echo=FALSE,message=FALSE,warning=FALSE, fig.cap="Burden ADD by mask (−log10 p capped at 100 in plot)."}
+gene_based_plot <- gene_based_add %>%
+  mutate(
+    Significant = PVAL_ADJ < 0.05,
+    LOG10P_CAP = pmin(LOG10P, 100)
+  )
 
-# Get top FDR significant genes for labeling (top 5 per mask)
-top_hits <- gene_based_plot %>% 
+top_hits <- gene_based_plot %>%
   filter(Significant) %>%
   group_by(MASK) %>%
-  slice_max(LOG10P, n = 5) %>%
+  slice_max(LOG10P_CAP, n = 3, with_ties = FALSE) %>%
   ungroup()
 
 gene_based_plot <- gene_based_plot %>%
   mutate(Label = ifelse(GENE %in% top_hits$GENE, GENE, NA))
 
-# Calculate FDR cutoff for the line
-fdr_cutoff <- min(gene_based$LOG10P[gene_based$PVAL_ADJ < 0.05], na.rm = TRUE)
+fdr_cutoff <- suppressWarnings(min(gene_based_add$LOG10P[gene_based_add$PVAL_ADJ < 0.05], na.rm = TRUE))
+if (!is.finite(fdr_cutoff)) fdr_cutoff <- NA_real_
+fdr_cutoff_plot <- if (is.finite(fdr_cutoff)) pmin(fdr_cutoff, 100) else NA_real_
 
-# Ensure BETA is numeric for x-axis (log-OR; typical range about -5 to 5)
-volcano_plot <- ggplot(gene_based_plot, aes(x = as.numeric(BETA), y = LOG10P, color = Significant)) +
-  geom_point(alpha = 0.6, size = 1.2) +
-  geom_hline(yintercept = fdr_cutoff, linetype = "dashed", color = "blue", alpha = 0.7) +
+volcano_plot <- ggplot(gene_based_plot, aes(x = as.numeric(BETA), y = LOG10P_CAP, color = Significant)) +
+  geom_point(alpha = 0.55, size = 1.35)
+if (is.finite(fdr_cutoff_plot)) {
+  volcano_plot <- volcano_plot +
+    geom_hline(yintercept = fdr_cutoff_plot, linetype = "dashed", color = "blue", alpha = 0.65)
+}
+volcano_plot <- volcano_plot +
   geom_vline(xintercept = 0, linetype = "dotted", color = "grey40") +
-  geom_text_repel(aes(label = Label), size = 2.5, max.overlaps = 30,
+  geom_text_repel(aes(label = Label), size = 2.6, max.overlaps = 12,
                   box.padding = 0.3, point.padding = 0.1) +
-  scale_color_manual(values = c("gray60", "red"), 
+  scale_color_manual(values = c("gray60", "red"),
                      labels = c("Not Significant", "FDR < 0.05")) +
   scale_x_continuous(limits = c(NA, NA), oob = scales::oob_keep) +
-  labs(title = "Volcano Plot: Gene-Based Burden Testing by Mask",
-       subtitle = paste("FDR significant genes:", sum(gene_based_plot$Significant)),
-       x = "Effect Size (Beta / log-OR)",
-       y = "-log10(p-value)",
-       color = "Significance") +
+  labs(
+       x = "Beta (log-OR)",
+       y = "-log10(p), capped at 100",
+       color = NULL) +
   facet_wrap(~MASK, scales = "free_y") +
-  theme(plot.title = element_text(size = 14, face = "bold"),
-        plot.subtitle = element_text(size = 10, color = "gray50"),
-        legend.position = "bottom",
-        strip.text = element_text(size = 12, face = "bold"))
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 11, face = "bold"))
 
 print(volcano_plot)
 ```
 
-### CHEK2 Gene Analysis
+### CHEK2 (ADD only)
+
+_Exploratory gene-level summary only; it does not address variant-level missingness, capture, or per-sample carrier data._
 
 ```{r chek2-analysis,echo=FALSE,message=FALSE,warning=FALSE}
-# Extract CHEK2 results specifically
-chek2_results <- gene_based %>%
+chek2_results <- gene_based_add %>%
   filter(GENE == "CHEK2") %>%
   select(GENE, MASK, THRESH, CHROM, GENPOS, ALLELE1, A1FREQ, BETA, OR, SE, LOG10P, PVAL, PVAL_ADJ, LOG10P_ADJ) %>%
   arrange(MASK, THRESH)
 
 if(nrow(chek2_results) > 0) {
-  cat("**CHEK2 Gene Results (Chr22):**\n\n")
-  
-  kable(chek2_results, 
+  kable(chek2_results,
         format = "html", digits = 4,
-        col.names = c("Gene", "Mask", "Threshold", "Chr", "Pos", "Alt Allele", "Alt Freq", 
+        col.names = c("Gene", "Mask", "Threshold", "Chr", "Pos", "Alt Allele", "Alt Freq",
                      "Beta", "OR", "SE", "-log10(P)", "P-value", "FDR P-value", "-log10(FDR P)")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
     column_spec(c(8, 10, 11), color = ifelse(!is.na(chek2_results$PVAL_ADJ) & chek2_results$PVAL_ADJ < 0.05, "red", "black"))
-  
-  # Summary of CHEK2 results
-  cat("\n**CHEK2 Summary:**\n")
-  cat("- **Total tests performed:**", nrow(chek2_results), "\n")
-  cat("- **Best p-value:**", sprintf("%.2e", min(chek2_results$PVAL, na.rm = TRUE)), "\n")
-  cat("- **Best FDR p-value:**", sprintf("%.2e", min(chek2_results$PVAL_ADJ, na.rm = TRUE)), "\n")
-  cat("- **Most significant mask:**", chek2_results$MASK[which.min(chek2_results$PVAL)], "\n")
-  cat("- **Most significant threshold:**", chek2_results$THRESH[which.min(chek2_results$PVAL)], "\n")
-  
 } else {
-  cat("**CHEK2 gene not found in results**")
+  cat("_CHEK2 not found in ADD burden results._")
 }
 ```
 
-## Risk-Increasing Genes (Beta > 0)
+## Directional burden (ADD)
+
+### Risk-increasing genes (Beta > 0, FDR < 0.05)
 
 ```{r risk-genes,echo=FALSE,message=FALSE,warning=FALSE}
-# Risk-increasing genes (positive associations)
-risk_genes <- gene_based %>%
+risk_genes <- gene_based_add %>%
   filter(PVAL_ADJ < 0.05, BETA > 0) %>%
   select(GENE, MASK, THRESH, BETA, PVAL_ADJ) %>%
   arrange(PVAL_ADJ)
 
 if(nrow(risk_genes) > 0) {
-    cat("**Found", nrow(risk_genes), "risk-increasing gene associations**\n\n")
     kable(risk_genes,
           format = "html", digits = 4,
           col.names = c("Gene", "Mask", "MAF Filter", "Beta", "FDR P-value")) %>%
       kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
-                    font_size = 11) %>%
+                    font_size = 13) %>%
       column_spec(1, bold = TRUE) %>%
       column_spec(c(4, 5), color = "red")
 } else {
     cat("No risk-increasing gene associations found")
 }
+```
 
-# Summary count
-risk_count <- gene_based %>%
-  filter(PVAL_ADJ < 0.05) %>%
-  summarise(Risk_Increasing = sum(BETA > 0, na.rm = TRUE),
-            Protective = sum(BETA < 0, na.rm = TRUE))
+### Protective genes (Beta < 0, FDR < 0.05)
 
-if(nrow(risk_count) > 0 && risk_count$Risk_Increasing > 0) {
-  cat("\n\n**Summary:**", risk_count$Risk_Increasing, "risk-increasing vs",
-      risk_count$Protective, "protective associations")
+```{r protective-genes,echo=FALSE,message=FALSE,warning=FALSE}
+protective_genes <- gene_based_add %>%
+  filter(PVAL_ADJ < 0.05, BETA < 0) %>%
+  select(GENE, MASK, THRESH, BETA, PVAL_ADJ) %>%
+  arrange(PVAL_ADJ)
+
+if(nrow(protective_genes) > 0) {
+    kable(protective_genes,
+          format = "html", digits = 4,
+          col.names = c("Gene", "Mask", "MAF Filter", "Beta", "FDR P-value")) %>%
+      kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
+                    font_size = 13) %>%
+      column_spec(1, bold = TRUE) %>%
+      column_spec(c(4, 5), color = "steelblue")
+} else {
+    cat("No protective gene associations found")
 }
 ```
 
-## Output Files
+## Output files
 
 ```{r save-results,echo=FALSE,message=FALSE,warning=FALSE}
-# Save ALL results to CSV files
 date_stamp <- format(Sys.Date(), "%Y%m%d")
 single_file <- paste0(params$project_name, "_single_variant_results_", date_stamp, ".csv")
-gene_file <- paste0(params$project_name, "_gene_based_results_", date_stamp, ".csv")
-
 write_csv(single_variant, single_file)
 cat("**All single variant results saved to:** `", single_file, "`\n\n")
 
-write_csv(gene_based, gene_file)
-cat("**All gene-based results saved to:** `", gene_file, "`\n\n")
+gene_file_all <- paste0(params$project_name, "_gene_based_results_alltests_", date_stamp, ".csv")
+gene_file_add <- paste0(params$project_name, "_gene_based_results_ADDonly_", date_stamp, ".csv")
+gene_meta_fp <- paste0(params$project_name, "_gene_based_meta_input_", date_stamp, ".csv")
+write_csv(gene_based_all, gene_file_all)
+write_csv(gene_based_add, gene_file_add)
 
-# Also save significant results if any exist
+meta_cols <- c("GENE", "MASK", "THRESH", "TEST", "BETA", "SE", "PVAL", "N_CASES", "N_CONTROLS", "A1FREQ_CASES", "A1FREQ_CONTROLS")
+gene_meta_input <- gene_based_all %>% select(any_of(meta_cols))
+write_csv(gene_meta_input, gene_meta_fp)
+
+cat("**Gene-based REGENIE tables:**\n\n")
+cat("- **All tests:** `", gene_file_all, "`\n")
+cat("- **ADD only (burden):** `", gene_file_add, "`\n")
+cat("- **Meta input (columns for downstream meta):** `", gene_meta_fp, "`\n\n")
+
+write_csv(
+  dplyr::filter(gene_based_all, GENE == "CHEK2"),
+  paste0(params$project_name, "_CHEK2_alltests_", date_stamp, ".csv")
+)
+write_csv(
+  dplyr::filter(gene_based_add, GENE == "CHEK2"),
+  paste0(params$project_name, "_CHEK2_ADDonly_", date_stamp, ".csv")
+)
+cat("**CHEK2 quick extracts:** `", params$project_name, "_CHEK2_alltests_", date_stamp, ".csv` and `", params$project_name, "_CHEK2_ADDonly_", date_stamp, ".csv`\n\n")
+
+top_gene_signals <- gene_based_add %>%
+  filter(PVAL_ADJ < 0.05) %>%
+  arrange(PVAL, GENE, MASK, THRESH)
+top_signals_fp <- paste0(params$project_name, "_top_gene_signals_ADDonly_", date_stamp, ".csv")
+write_csv(top_gene_signals, top_signals_fp)
+cat("**Top ADD gene signals (FDR < 0.05):** `", top_signals_fp, "`\n\n")
+
 if(nrow(significant_variants) > 0) {
     sig_single_file <- paste0(params$project_name, "_significant_single_variants_", date_stamp, ".csv")
     write_csv(significant_variants, sig_single_file)
@@ -655,12 +605,79 @@ if(nrow(significant_variants) > 0) {
 }
 
 if(exists("suggestive_genes") && nrow(suggestive_genes) > 0) {
-    sig_gene_file <- paste0(params$project_name, "_suggestive_gene_associations_", date_stamp, ".csv")
+    sig_gene_file <- paste0(params$project_name, "_suggestive_gene_associations_ADDonly_", date_stamp, ".csv")
     write_csv(suggestive_genes, sig_gene_file)
-    cat("**Suggestive gene-based associations saved to:** `", sig_gene_file, "`\n\n")
+    cat("**Suggestive ADD-only (exploratory) saved to:** `", sig_gene_file, "`\n\n")
 } else {
-    cat("**No suggestive gene associations found**\n\n")
+    cat("**No suggestive ADD-only gene associations found**\n\n")
 }
 
 cat("**Analysis completed on:**", format(Sys.time(), "%Y-%m-%d %H:%M:%S"))
+```
+
+## Appendix: REGENIE pipeline flowchart
+
+```{r regenie_flowchart, echo=FALSE, fig.height=7}
+grViz("
+digraph regenie_pipeline {
+
+  graph [rankdir = TB, fontsize = 12, fontname = Helvetica]
+  node [fontname = Helvetica, fontsize = 11, shape = box, style = filled, color = DarkBlue]
+
+  input_vcf [label = 'Multi-chromosome VCF\\nfiles', fillcolor = Khaki, fontcolor = Black, shape = folder]
+  samples [label = 'Sample list', fillcolor = Khaki, fontcolor = Black, shape = note]
+  pheno [label = 'Phenotypes', fillcolor = Khaki, fontcolor = Black, shape = note]
+  covar [label = 'Covariates', fillcolor = Khaki, fontcolor = Black, shape = note]
+
+  preprocess [label = 'VCF Preprocessing\\n(normalize, filter, QC)', fillcolor = LightSkyBlue]
+  pgen_convert [label = 'Convert to PLINK2\\nPGEN format', fillcolor = LightSkyBlue]
+
+  step1_chr1 [label = 'Step 1\\nChr 1\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
+  step1_chr_ellipsis [label = '...', fillcolor = LavenderBlush, shape = parallelogram]
+  step1_chr22 [label = 'Step 1\\nChr 22\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
+
+  merge_step1 [label = 'Merge Step 1\\nresults', fillcolor = MistyRose, shape = diamond]
+
+  step2_single [label = 'Step 2 Single-Variant\\nAssociation Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
+  step2_gene [label = 'Step 2 Gene-Based\\nAssociation Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
+
+  vep_annotate [label = 'VEP Annotation\\n(pathogenic/VUS variants)', fillcolor = LemonChiffon]
+  report_gen [label = 'Generate HTML Report\\n(statistics, plots, tables)', fillcolor = AliceBlue, shape = note]
+
+  input_vcf -> preprocess
+  samples -> preprocess
+  preprocess -> pgen_convert
+  preprocess -> vep_annotate
+
+  pgen_convert -> step1_chr1
+  pgen_convert -> step1_chr_ellipsis
+  pgen_convert -> step1_chr22
+
+  step1_chr1 -> merge_step1 [style = dotted]
+  step1_chr_ellipsis -> merge_step1 [style = dotted]
+  step1_chr22 -> merge_step1 [style = dotted]
+
+  merge_step1 -> step2_single
+  merge_step1 -> step2_gene
+  vep_annotate -> step2_gene
+
+  step2_single -> report_gen
+  step2_gene -> report_gen
+
+  {rank = same; step1_chr1; step1_chr_ellipsis; step1_chr22}
+  {rank = same; step2_single; step2_gene}
+
+  subgraph cluster_parallel {
+    label = 'Parallel Processing\\n(Chromosome-level)'
+    fontsize = 14
+    style = filled
+    fillcolor = WhiteSmoke
+    step1_chr1
+    step1_chr_ellipsis
+    step1_chr22
+    step2_single
+    step2_gene
+  }
+}
+")
 ```

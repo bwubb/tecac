@@ -16,7 +16,7 @@ GENO_THR=config.get('qc',{}).get('geno_thr',0.01)
 MAF_THR=config.get('qc',{}).get('maf_thr',0.05)
 HWE_THR=config.get('qc',{}).get('hwe_thr',1e-6)
 MIND_THR=config.get('qc',{}).get('mind_thr',0.05)#0.01
-DIFF_MISS_THR=config.get('qc',{}).get('diff_miss_thr',0.01)
+DIFF_MISS_THR=config.get('qc',{}).get('diff_miss_thr'1e-5)
 
 wildcard_constraints:
     CHR='[0-9XY]+'
@@ -236,10 +236,10 @@ rule count_variant_types_postfilter:
 #   -> aggregate missingness/het -> exclusions -> two branches:
 #       (A) qc_filter2 + build merge + PCA  (B) het_miss VCF -> MNP pipeline -> annotation pgen + VEP
 #   -> report, final_annotation, final_build, final_lists
-# Requires: config input.covariates = path to file (cols: FID, IID, FREEZE, STATUS) for diff-miss and report.
+# Requires: config input.covariates = path to file (FID, IID, FREEZE, STATUS; STATUS 1=control 2=case) for diff-miss and report.
 # ---------------------------------------------------------------------------
 
-# Convert filtered BCF to PLINK format
+# Convert filtered BCF to PLINK format. Psam has FID=IID (double ID) and SEX; sex updated from chrX.
 rule bcf_to_plink_per_chr:
     wildcard_constraints:
         CHR='[0-9]+'
@@ -259,11 +259,10 @@ rule bcf_to_plink_per_chr:
         stdout="logs/lsf/bcf_to_plink_per_chr.chr{CHR}.o"
     shell:
         """
-        # Convert BCF to PLINK
-        plink2 --bcf {input.bcf} --vcf-half-call reference --make-pgen --out {params.tmp}
+        # psam with FID=IID and SEX=0 (all plink files use double ID; sex updated below from chrX)
+        bcftools query -l {input.bcf} | awk 'BEGIN {{OFS="\\t"}} {{print $1,$1,"0"}}' | cat <(echo -e "#FID\\tIID\\tSEX") - > {params.tmp}.psam
+        plink2 --bcf {input.bcf} --psam {params.tmp}.psam --vcf-half-call reference --make-pgen --out {params.tmp}
         plink2 --pfile {params.tmp} --update-sex {input.sex_file} --make-pgen --out {params.outputname}
-        
-        #rm -f {params.tmp}.pgen {params.tmp}.pvar {params.tmp}.psam
         """
 
 # Calculate missingness and frequency per chromosome (chr1-22)
@@ -362,9 +361,9 @@ rule parse_plink_filter_metrics:
         echo "CHR FILTER VARIANTS_REMOVED" > {output}
         
         # Extract variant removal counts from log (portable: sed, no grep -P)
-        GENO=$(sed -n 's/.* \([0-9][0-9]*\) variants removed due to missing genotype data.*/\1/p' {input.log} 2>/dev/null | head -1); GENO=${{GENO:-0}}
-        MAF=$(sed -n 's/.* \([0-9][0-9]*\) variants removed due to allele frequency threshold.*/\1/p' {input.log} 2>/dev/null | head -1); MAF=${{MAF:-0}}
-        HWE=$(sed -n 's/.* \([0-9][0-9]*\) variants removed due to Hardy-Weinberg exact test.*/\1/p' {input.log} 2>/dev/null | head -1); HWE=${{HWE:-0}}
+        GENO=$(sed -n 's/.* \\([0-9][0-9]*\\) variants removed due to missing genotype data.*/\\1/p' {input.log} 2>/dev/null | head -1); GENO=${{GENO:-0}}
+        MAF=$(sed -n 's/.* \\([0-9][0-9]*\\) variants removed due to allele frequency threshold.*/\\1/p' {input.log} 2>/dev/null | head -1); MAF=${{MAF:-0}}
+        HWE=$(sed -n 's/.* \\([0-9][0-9]*\\) variants removed due to Hardy-Weinberg exact test.*/\\1/p' {input.log} 2>/dev/null | head -1); HWE=${{HWE:-0}}
         # LD pruning: plink2 writes excluded IDs to .prune.out; use line count (no header)
         PRUNE=$(wc -l < {input.prune_out} 2>/dev/null); PRUNE=${{PRUNE:-0}}
         
@@ -374,7 +373,8 @@ rule parse_plink_filter_metrics:
         echo "{wildcards.CHR} PRUNE $PRUNE" >> {output}
         """
 
-# Test for differential missingness case vs control (plink 1.9). Covariates: cols 1=FID, 2=IID, 3=FREEZE, 4=STATUS.
+# Test for differential missingness case vs control (plink 1.9). Covariates: STATUS 1=control, 2=case.
+# Build a minimal pheno (FID IID STATUS) from covariates so plink gets exactly 1/2 and IDs match.
 rule plink_test_missing:
     wildcard_constraints:
         CHR='[0-9]+'
@@ -396,12 +396,12 @@ rule plink_test_missing:
     shell:
         """
         plink2 --pfile {params.inputname} --make-bed --out {params.bed_prefix}
-        awk 'NR==1 {{next}} {{g=($4==0||$4=="Control"||$4=="control"?1:($4==1||$4=="Case"||$4=="case"?2:0)); if(g>0) print $1,$2,g}}' {input.covariates} | cat <(echo -e "FID\\tIID\\tCASE") - > {params.pheno_file}
+        awk 'BEGIN {{OFS="\\t"}} NR==1 {{print "FID","IID","STATUS"; next}} $4==1 || $4==2 {{print $1,$2,$4}}' {input.covariates} > {params.pheno_file}
         plink --bfile {params.bed_prefix} --test-missing --pheno {params.pheno_file} --allow-no-sex --out {params.outputname}
         rm -f {params.bed_prefix}.bed {params.bed_prefix}.bim {params.bed_prefix}.fam {params.bed_prefix}.log {params.pheno_file}
         """
 
-# Differential missingness freeze 2 vs 3 (covariates col 3=FREEZE; header FREEZE in pheno).
+# Differential missingness freeze 2 vs 3. Plink needs binary 1/2; build pheno with FREEZE 2->1, 3->2.
 rule plink_test_missing_freeze:
     wildcard_constraints:
         CHR='[0-9]+'
@@ -415,8 +415,8 @@ rule plink_test_missing_freeze:
     params:
         inputname="data/plink/chr{CHR}.variants_filtered",
         bed_prefix="data/plink/chr{CHR}.bed_freeze_temp",
-        pheno_file="data/plink/chr{CHR}.pheno_freeze.txt",
         sample_list="data/plink/chr{CHR}.freeze_sample_list.txt",
+        pheno_file="data/plink/chr{CHR}.pheno_freeze.txt",
         outputname="data/plink/chr{CHR}.test_freeze"
     log:
         stderr="logs/lsf/plink_test_missing_freeze.chr{CHR}.e",
@@ -424,10 +424,10 @@ rule plink_test_missing_freeze:
     shell:
         """
         plink2 --pfile {params.inputname} --make-bed --out {params.bed_prefix}
-        awk 'NR==1 {{next}} $3==2||$3==3 {{print $1,$2}}' {input.covariates} > {params.sample_list}
-        awk 'NR==1 {{next}} $3==2||$3==3 {{g=($3==2?1:2); print $1,$2,g}}' {input.covariates} | cat <(echo -e "FID\\tIID\\tFREEZE") - > {params.pheno_file}
+        awk 'BEGIN {{OFS="\\t"}} NR==1 {{next}} $3==2||$3==3 {{print $1,$2}}' {input.covariates} > {params.sample_list}
+        awk 'BEGIN {{OFS="\\t"}} NR==1 {{print "FID","IID","FREEZE_GROUP"; next}} $3==2||$3==3 {{g=($3==2?1:2); print $1,$2,g}}' {input.covariates} > {params.pheno_file}
         plink --bfile {params.bed_prefix} --keep {params.sample_list} --test-missing --pheno {params.pheno_file} --allow-no-sex --out {params.outputname}
-        rm -f {params.bed_prefix}.bed {params.bed_prefix}.bim {params.bed_prefix}.fam {params.bed_prefix}.log {params.pheno_file} {params.sample_list}
+        rm -f {params.bed_prefix}.bed {params.bed_prefix}.bim {params.bed_prefix}.fam {params.bed_prefix}.log {params.sample_list} {params.pheno_file}
         """
 
 # Recompute sample missingness on filtered variants (chr1-22 only)
@@ -515,7 +515,7 @@ rule parse_diff_miss:
     input:
         "data/plink/chr{CHR}.test.missing"
     output:
-        "data/qc/exclusions/chr{CHR}.diff_miss_fail.txt"
+        "data/qc/exclusions/chr{CHR}.diff_miss_exclude.txt"
     params:
         threshold=DIFF_MISS_THR
     log:
@@ -531,8 +531,21 @@ rule parse_diff_miss:
         touch {output}
         """
 
-# Generate variant ID list from filtered plink files
-# NOTE: Differential missingness is calculated for QC reporting but NOT used for filtering
+# Passing variant IDs after removing differential-missingness failures (P < 1e-5)
+rule passing_variants_after_diffmiss:
+    wildcard_constraints:
+        CHR='[0-9]+'
+    input:
+        passing="data/qc/chr{CHR}.passing_variants.txt",
+        fail="data/qc/exclusions/chr{CHR}.diff_miss_fail.txt"
+    output:
+        "data/qc/chr{CHR}.passing_variants_after_diffmiss.txt"
+    shell:
+        """
+        comm -23 <(sort {input.passing}) <(sort {input.fail}) > {output}
+        """
+
+# Generate variant ID list from filtered plink files (skip pvar header/comment lines starting with #)
 rule extract_variant_ids:
     wildcard_constraints:
         CHR='[0-9]+'
@@ -545,7 +558,7 @@ rule extract_variant_ids:
         stdout="logs/lsf/extract_variant_ids.chr{CHR}.o"
     shell:
         """
-        awk 'NR>1 {{print $3}}' {input.pvar} > {output}
+        awk '$0 !~ /^#/ {{print $3}}' {input.pvar} > {output}
         """
 
 # Count variants after differential missingness filtering
@@ -618,7 +631,7 @@ rule bcftools_filter2_bcf:
     input:
         bcf="data/bcftools/chr{CHR}.qc_filter1.bcf",
         csi="data/bcftools/chr{CHR}.qc_filter1.bcf.csi",
-        passing_variants="data/qc/chr{CHR}.passing_variants.txt",
+        passing_variants="data/qc/chr{CHR}.passing_variants_after_diffmiss.txt",
         exclusions="data/qc/exclusions/het_missingness_failures.txt"
     output:
         bcf="data/bcftools/chr{CHR}.qc_filter2.bcf",
@@ -638,15 +651,15 @@ rule bcftools_het_miss_vcf:
         bcf="data/bcftools/chr{CHR}.qc_filter1.bcf",
         exclusions="data/qc/exclusions/het_missingness_failures.txt"
     output:
-        vcf1="data/bcftools/chr{CHR}.qc_filter1.het_miss.vcf",
-        vcf2="data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vcf"
+        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf",
+        vcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vcf"
     log:
         stderr="logs/lsf/bcftools_het_miss_vcf.chr{CHR}.e",
         stdout="logs/lsf/bcftools_het_miss_vcf.chr{CHR}.o"
     shell:
         """
-        bcftools view -S ^{input.exclusions} -a -Ov -o {output.vcf1}  {input.bcf}
-        bcftools view -G -Ov -o {output.vcf2} {output.vcf1}
+        bcftools view -S ^{input.exclusions} -a -Ob -W=csi -o {output.bcf}  {input.bcf}
+        bcftools view -G -Ov -o {output.vcf} {output.bcf}
         """
 
 rule first_variants_annotation:
@@ -659,6 +672,8 @@ rule first_variants_annotation:
     log:
         stderr="logs/lsf/first_variants_annotation.chr{CHR}.e",
         stdout="logs/lsf/first_variants_annotation.chr{CHR}.o"
+    resources:
+        mem_mb=32000
     shell:
         """
         export SINGULARITY_TMPDIR=/scratch/$USER/sing_tmp
@@ -718,15 +733,33 @@ rule find_mnp_variants:
     shell:
         "python find_mnp_variants.py -i {input.csv} -o {output.csv} -m no_sample -r {output.regions} -I {output.id_file}"
 
+# Extract variants that are NOT MNP pairs (for concat after manage_mnp_gt)
+rule bcftools_mnp_exclude_pairs:
+    wildcard_constraints:
+        CHR='[0-9]+'
+    input:
+        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf",
+        id_file="data/mnp/chr{CHR}.id.txt"
+    output:
+        vcf="data/mnp/chr{CHR}.het_miss.excl_mnp_pairs.vcf"
+    log:
+        stderr="logs/lsf/bcftools_mnp_exclude_pairs.chr{CHR}.e",
+        stdout="logs/lsf/bcftools_mnp_exclude_pairs.chr{CHR}.o"
+    shell:
+        """
+        bcftools view -e 'ID=@{input.id_file}' -Ov -o {output.vcf} {input.bcf}
+        """
+
+# Extract ONLY MNP pair variants (id1, id2) - small VCF for manage_mnp_gt
 rule bcftools_mnp_filter:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        vcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.vcf",
+        vcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf",
         regions="data/mnp/chr{CHR}.regions.txt",
         id_file="data/mnp/chr{CHR}.id.txt"
     output:
-        vcf="data/mnp/chr{CHR}.mnp.vcf"
+        vcf="data/mnp/chr{CHR}.mnp_pairs_only.vcf"
     log:
         stderr="logs/lsf/bcftools_mnp_filter.chr{CHR}.e",
         stdout="logs/lsf/bcftools_mnp_filter.chr{CHR}.o"
@@ -739,7 +772,7 @@ rule bcftools_mnp_sample_info:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        vcf="data/mnp/chr{CHR}.mnp.vcf"
+        vcf="data/mnp/chr{CHR}.mnp_pairs_only.vcf"
     output:
         "data/mnp/chr{CHR}.mnp_sample_info.txt"
     log:
@@ -781,25 +814,45 @@ rule plan_mnp_gt:
     shell:
         "python plan_mnp_gt.py -i {input.sample_info} -o {output.plan} -r {params.ref}"
 
+# Apply GT plan to MNP pairs only (small input = low memory)
 rule manage_mnp_gt:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
         plan="data/mnp/chr{CHR}.mnp_gt.plan.txt",
-        vcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.vcf"
+        vcf="data/mnp/chr{CHR}.mnp_pairs_only.vcf"
     output:
-        vcf="data/mnp/chr{CHR}.qc_filter1.het_miss.mnp_gt.vcf"
+        vcf="data/mnp/chr{CHR}.mnp_gt.vcf"
     log:
         stderr="logs/lsf/manage_mnp_gt.chr{CHR}.e",
         stdout="logs/lsf/manage_mnp_gt.chr{CHR}.o"
+    resources:
+        mem_mb=32000
     shell:
         "python manage_mnp_gt.py -p {input.plan} -i {input.vcf} -o {output.vcf}"
+
+# Concat non-MNP variants + MNP pairs (with updated GTs + new MNP records)
+rule bcftools_mnp_concat:
+    wildcard_constraints:
+        CHR='[0-9]+'
+    input:
+        excl="data/mnp/chr{CHR}.het_miss.excl_mnp_pairs.vcf",
+        mnp_gt="data/mnp/chr{CHR}.mnp_gt.vcf"
+    output:
+        vcf="data/mnp/chr{CHR}.het_miss.mnp_gt.combined.vcf"
+    log:
+        stderr="logs/lsf/bcftools_mnp_concat.chr{CHR}.e",
+        stdout="logs/lsf/bcftools_mnp_concat.chr{CHR}.o"
+    shell:
+        """
+        bcftools concat {input.excl} {input.mnp_gt} -Ov -o {output.vcf}
+        """
 
 rule bcftools_sort_mnp_gt_bcf:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        vcf="data/mnp/chr{CHR}.qc_filter1.het_miss.mnp_gt.vcf"
+        vcf="data/mnp/chr{CHR}.het_miss.mnp_gt.combined.vcf"
     output:
         bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.mnp_gt.sorted.bcf"
     log:
@@ -807,7 +860,7 @@ rule bcftools_sort_mnp_gt_bcf:
         stdout="logs/lsf/bcftools_sort_mnp_gt_bcf.chr{CHR}.o"
     shell:
         """
-        bcftools sort -W=csi -Ob -o {output.bcf}  {input.vcf}
+        bcftools sort -W=csi -Ob -o {output.bcf} {input.vcf}
         """
 
 rule bcftools_annotation2_vcf:
@@ -945,6 +998,8 @@ rule annotate_variants:
     log:
         stderr="logs/lsf/annotate_variants.chr{CHR}.e",
         stdout="logs/lsf/annotate_variants.chr{CHR}.o"
+    resources:
+        mem_mb=32000
     shell:
         """
         export SINGULARITY_TMPDIR=/scratch/$USER/sing_tmp
@@ -985,6 +1040,8 @@ rule parse_vep:
     log:
         stderr="logs/lsf/parse_vep.chr{CHR}.e",
         stdout="logs/lsf/parse_vep.chr{CHR}.o"
+    resources:
+        mem_mb=32000
     shell:
         "python vep_vcf_parser2.py -i {input} -o {output} -m no_sample"
 
@@ -1089,7 +1146,7 @@ rule final_build:
         rsync -av {input.eigenval} {output.eigenval}
         """
     
-# Splits passing samples into controls vs cases. Prefers covariate file (col4=STATUS); else separate controls file.
+# Splits passing samples into controls vs cases. Prefers covariate file (col4=STATUS, 1=control 2=case); else separate controls file.
 rule final_lists:
     input:
         samples="data/qc/passing_samples.txt",
@@ -1119,8 +1176,8 @@ rule final_lists:
             if len(lines) > 1:
                 for line in lines[1:]:
                     parts = line.strip().split()
-                    if len(parts) >= 4 and parts[3] in ('0', 'Control', 'control', 'CONTROL'):
-                        controls.add(parts[1])  # IID
+                    if len(parts) >= 4 and parts[3] in ('1', 'Control', 'control', 'CONTROL'):
+                        controls.add(parts[1])  # IID (STATUS 1=control)
         elif params.controls_file and os.path.isfile(params.controls_file):
             with open(params.controls_file,'r') as c:
                 controls = set(s.strip() for s in c.read().splitlines())
@@ -1137,3 +1194,4 @@ rule final_lists:
 
 
             
+#NOTE I could exclude the mnp pairs from vep annotated files, and just annotete the mnp pairs + mnp and concat and sort...

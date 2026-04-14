@@ -1,0 +1,169 @@
+---
+title: "ExWAS QC Pipeline Overview (select_variants2.smk)"
+author: "Brad Wubbenhorst"
+output:
+  html_document:
+    theme: paper
+    toc: false
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+library(DiagrammeR)
+```
+
+# ExWAS QC Pipeline Flowchart
+
+High-level flow of the variant and sample QC pipeline. Per-chromosome steps run in parallel (chr 1–22); chrX is used for sex inference only.
+
+```{r qc_flowchart, echo=FALSE, fig.cap="ExWAS QC pipeline (select_variants2.smk)", fig.height=10}
+grViz("
+digraph qc_pipeline {
+
+  graph [rankdir = TB, fontsize = 12, fontname = Helvetica]
+  node [fontname = Helvetica, fontsize = 10, shape = box, style = filled]
+  edge [fontname = Helvetica, fontsize = 9]
+
+  # Inputs
+  input_bcf [label = 'Per-chr BCFs\\n(config)', fillcolor = Khaki, fontcolor = Black, shape = folder]
+  covariates [label = 'Covariates\\n(FID, IID, FREEZE, STATUS)', fillcolor = Khaki, fontcolor = Black, shape = note]
+
+  # ChrX sex check
+  chrX_plink [label = 'ChrX → PLINK2\\n(psam FID=IID)', fillcolor = LightSkyBlue]
+  chrX_het [label = 'ChrX heterozygosity\\n(F-stat)', fillcolor = LightSkyBlue]
+  infer_sex [label = 'Infer sex\\n(exclusions, sex_update.txt)', fillcolor = LightSkyBlue]
+
+  # Prefilter and bcftools QC
+  prefilter [label = 'Prefilter BCF\\n(drop sex-check fails)', fillcolor = LightCyan]
+  qc_filter1 [label = 'bcftools qc_filter1\\n(NoHQHet, call rate, PASS)', fillcolor = LightCyan]
+  stats_pre [label = 'Variant type counts\\n(pre/post filter)', fillcolor = WhiteSmoke, shape = note]
+
+  # BCF → PLINK (autosomes)
+  bcf_to_plink [label = 'BCF → PLINK2 pgen\\n(per chr 1–22, psam + sex)', fillcolor = Lavender]
+  plink_miss_freq [label = 'PLINK2 missing, freq, hardy', fillcolor = Lavender]
+  plink_filter [label = 'PLINK2 filter variants\\n(geno, MAF, HWE, LD prune)', fillcolor = Lavender]
+  variants_filtered [label = 'variants_filtered\\n(pgen/pvar/psam)', fillcolor = LavenderBlush]
+
+  # Differential missingness and sample QC
+  test_missing [label = 'Test missing\\n(case vs control, freeze 2 vs 3)', fillcolor = MistyRose]
+  sample_miss [label = 'Sample missingness\\npost-filter', fillcolor = MistyRose]
+  het_calc [label = 'Heterozygosity\\n(per chr)', fillcolor = MistyRose]
+  agg_miss [label = 'Aggregate missingness\\n→ high_missingness exclusions', fillcolor = PeachPuff]
+  agg_het [label = 'Aggregate heterozygosity\\n→ het_outliers exclusions', fillcolor = PeachPuff]
+  het_miss_excl [label = 'Combine exclusions\\n(het_missingness_failures)', fillcolor = PeachPuff]
+
+  # Branch A: QC filter 2, merge, PCA
+  qc_filter2 [label = 'bcftools qc_filter2\\n(passing variants, drop het/miss fails)', fillcolor = HoneyDew]
+  build_pgen [label = 'PLINK2 build pgen\\n(per chr, qc_filter2)', fillcolor = HoneyDew]
+  merge_build [label = 'Merge chr 1–22\\n(build.pgen, snplist, passing_samples)', fillcolor = HoneyDew]
+  pca [label = 'PCA (chr 1–7, 9–22)\\n20 PCs', fillcolor = HoneyDew]
+
+  # Branch B: MNP pipeline (split: non-pairs + pairs-only, then manage_gt on pairs, concat, sort)
+  het_miss_vcf [label = 'het_miss BCF/VCF\\n(drop het/miss fails, keep all vars)', fillcolor = LemonChiffon]
+  vep_first [label = 'VEP annotation\\n(no_sample.vcf)', fillcolor = LemonChiffon]
+  find_mnp [label = 'Find MNP variants\\n(pairs, regions, id_file)', fillcolor = LemonChiffon]
+  mnp_exclude [label = 'bcftools exclude MNP pairs\\n(excl_mnp_pairs.vcf)', fillcolor = LemonChiffon]
+  mnp_pairs_only [label = 'bcftools MNP pairs only\\n(mnp_pairs_only.vcf)', fillcolor = LemonChiffon]
+  mnp_sample_plan [label = 'MNP sample info, test, plan', fillcolor = LemonChiffon]
+  manage_mnp [label = 'manage_mnp_gt\\n(on pairs-only VCF)', fillcolor = LemonChiffon]
+  mnp_concat [label = 'Concat excl + mnp_gt\\n(combined.vcf)', fillcolor = LemonChiffon]
+  sort_mnp [label = 'Sort combined BCF', fillcolor = LemonChiffon]
+  annotation_pgen [label = 'PLINK2 annotation pgen\\n(from MNP-corrected BCF)', fillcolor = LemonChiffon]
+  vep_annotate [label = 'VEP annotate\\n(full annotation)', fillcolor = LemonChiffon]
+  parse_vep [label = 'Parse VEP → report.csv', fillcolor = LemonChiffon]
+
+  # Report and final
+  qc_report [label = 'QC report\\n(exwas_qc_report.html)', fillcolor = AliceBlue, shape = note]
+  final_annotation [label = 'Final annotation\\n(per-chr BCF, pgen, report)', fillcolor = AliceBlue]
+  final_build [label = 'Final build\\n(merged pgen, PCA)', fillcolor = AliceBlue]
+  final_lists [label = 'Final lists\\n(samples, controls, cases)', fillcolor = AliceBlue]
+
+  # Connections: inputs
+  input_bcf -> chrX_plink
+  input_bcf -> prefilter
+  covariates -> test_missing
+  covariates -> qc_report
+  covariates -> final_lists
+
+  # ChrX chain
+  chrX_plink -> chrX_het -> infer_sex
+
+  # Prefilter and qc_filter1
+  infer_sex -> prefilter
+  prefilter -> qc_filter1
+  prefilter -> stats_pre
+  qc_filter1 -> stats_pre
+
+  # BCF to PLINK and variant QC
+  infer_sex -> bcf_to_plink
+  qc_filter1 -> bcf_to_plink
+  bcf_to_plink -> plink_miss_freq -> plink_filter -> variants_filtered
+
+  # Test missing and sample QC (from variants_filtered)
+  variants_filtered -> test_missing
+  variants_filtered -> sample_miss
+  variants_filtered -> het_calc
+  sample_miss -> agg_miss
+  het_calc -> agg_het
+  agg_miss -> agg_het -> het_miss_excl
+
+  # Branch A: qc_filter2 and merge
+  qc_filter1 -> qc_filter2
+  plink_filter -> qc_filter2
+  het_miss_excl -> qc_filter2
+  qc_filter2 -> build_pgen
+  infer_sex -> build_pgen
+  build_pgen -> merge_build
+  merge_build -> pca
+
+  # Branch B: het_miss and MNP (split → manage on pairs only → concat → sort)
+  qc_filter1 -> het_miss_vcf
+  het_miss_excl -> het_miss_vcf
+  het_miss_vcf -> vep_first -> find_mnp
+  find_mnp -> mnp_exclude
+  find_mnp -> mnp_pairs_only
+  het_miss_vcf -> mnp_exclude
+  het_miss_vcf -> mnp_pairs_only
+  mnp_pairs_only -> mnp_sample_plan -> manage_mnp
+  mnp_exclude -> mnp_concat
+  manage_mnp -> mnp_concat
+  mnp_concat -> sort_mnp
+  sort_mnp -> annotation_pgen
+  infer_sex -> annotation_pgen
+  sort_mnp -> vep_annotate -> parse_vep
+
+  # Report (needs both branches and other outputs)
+  test_missing -> qc_report
+  agg_miss -> qc_report
+  agg_het -> qc_report
+  pca -> qc_report
+  parse_vep -> qc_report
+
+  # Final outputs
+  parse_vep -> final_annotation
+  annotation_pgen -> final_annotation
+  pca -> final_build
+  merge_build -> final_build
+  merge_build -> final_lists
+  het_miss_excl -> final_lists
+  qc_report -> final_annotation
+
+  # Layout hints
+  { rank = same; qc_filter2; het_miss_vcf }
+  { rank = same; mnp_exclude; mnp_pairs_only }
+  { rank = same; final_annotation; final_build; final_lists }
+}
+")
+```
+
+## Summary
+
+| Phase | Steps |
+|-------|--------|
+| **Sex check** | ChrX → PLINK2, heterozygosity, infer sex; drop failures from all downstream BCFs. |
+| **Prefilter / qc_filter1** | Drop sex fails; apply NoHQHet, low call rate, PASS; count variant types. |
+| **PLINK variant QC** | BCF → pgen (per chr, FID=IID, sex); missing/freq/hardy; filter geno/MAF/HWE/LD → `variants_filtered`. |
+| **Sample & diff missingness** | Test missing (case/control, freeze); aggregate sample missingness and heterozygosity → exclusions. |
+| **Branch A** | qc_filter2 (passing variants, drop het/miss fails) → build pgen → merge chr 1–22 → PCA. |
+| **Branch B** | het_miss VCF → VEP → find MNPs. Split: (1) excl_mnp_pairs.vcf = all variants except MNP pairs; (2) mnp_pairs_only.vcf = only pairs. manage_mnp_gt on pairs-only (low memory); concat excl + mnp_gt → sort → annotation pgen + full VEP → report CSV. |
+| **Report & final** | Rmd QC report; copy annotation/build to `data/final`; write samples/controls/cases lists. |

@@ -18,18 +18,20 @@ input_files=args.input_files
 
 missingness_exclusions=pd.read_csv(missingness_exclusions_file,sep=' ',header=None,names=['IID'])
 
+# plink2 .het has #FID and IID (double ID) or legacy #IID
+id_col='IID' if 'IID' in pd.read_csv(input_files[0],sep='\s+',nrows=0).columns else '#IID'
 dfs=[]
 for f in input_files:
-    df=pd.read_csv(f,sep='\\s+')
-    dfs.append(df[['#IID','OBS_CT','O(HOM)']])
+    df=pd.read_csv(f,sep='\s+')
+    dfs.append(df[[id_col,'OBS_CT','O(HOM)']])
 
 combined=pd.concat(dfs)
-agg=combined.groupby('#IID').sum().reset_index()
+agg=combined.groupby(id_col).sum().reset_index()
 agg['N_NM']=agg['OBS_CT']
 agg['O_HOM']=agg['O(HOM)']
 agg['Fhat']=(agg['N_NM']-agg['O_HOM'])/agg['N_NM']
 
-agg_filtered=agg[~agg['#IID'].isin(missingness_exclusions['IID'])]
+agg_filtered=agg[~agg[id_col].isin(missingness_exclusions['IID'])]
 agg_filtered.to_csv(output_aggregated,sep='\t',index=False)
 
 mean_F=agg_filtered['Fhat'].mean()
@@ -38,5 +40,5 @@ lower_bound=mean_F-3*sd_F
 upper_bound=mean_F+3*sd_F
 
 het_outliers=agg_filtered[(agg_filtered['Fhat']<lower_bound)|(agg_filtered['Fhat']>upper_bound)]
-het_outliers['#IID'].to_csv(output_exclusions,sep=' ',index=False,header=False)
-het_outliers[['#IID','Fhat']].to_csv(output_report,sep=',',index=False,header=True)
+het_outliers[id_col].to_csv(output_exclusions,sep=' ',index=False,header=False)
+het_outliers[[id_col,'Fhat']].to_csv(output_report,sep=',',index=False,header=True)
