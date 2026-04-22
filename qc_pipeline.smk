@@ -64,7 +64,9 @@ rule generate_qc_report:
         variant_afreq=expand("data/plink/chr{CHR}.afreq",CHR=CHROMOSOMES_AUTOSOMAL),
         variant_vmiss=expand("data/plink/chr{CHR}.vmiss",CHR=CHROMOSOMES_AUTOSOMAL),
         variant_hardy=expand("data/plink/chr{CHR}.hardy",CHR=CHROMOSOMES_AUTOSOMAL),
-        postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL)
+        postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
+        # From MNP pipeline (e.g. mnp.smk). Comment out until a rule produces this file.
+        mnp_validation_metrics="data/mnp/mnp.validation.metrics.tsv"
     output:
         html="data/qc/reports/exwas_qc_report.html",
         dated=f"exwas_qc_report.{DATE}.html",

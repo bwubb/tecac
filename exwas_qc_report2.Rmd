@@ -6,7 +6,7 @@ output:
   html_document:
     toc: true
     toc_float: true
-    toc_depth: 3
+    toc_depth: 2
     theme: flatly
     code_folding: hide
 params:
@@ -15,6 +15,8 @@ params:
   covariate_file: ""   # single file WITH HEADER: FID, IID, Status, Freeze (Regnie + report + pipeline)
   # Optional override; if empty, report loads anc_group.tsv next to this .Rmd or in getwd()
   anc_group_file: ""
+  # Optional: override path to MNP validation summary TSV (default data/mnp/mnp.validation.metrics.tsv under data_dir)
+  mnp_validation_metrics: ""
 ---
 
 ```{r setup, include=FALSE}
@@ -47,6 +49,12 @@ ANC_GROUP_FILE <- if (!is.null(params$anc_group_file) && nzchar(params$anc_group
 }
 if (length(ANC_GROUP_FILE) == 0 || is.na(ANC_GROUP_FILE[1]) || !nzchar(ANC_GROUP_FILE[1])) ANC_GROUP_FILE <- ""
 
+MNP_VALIDATION_METRICS <- if (!is.null(params$mnp_validation_metrics) && nzchar(params$mnp_validation_metrics)) {
+  params$mnp_validation_metrics
+} else {
+  file.path(DATA_DIR, "mnp", "mnp.validation.metrics.tsv")
+}
+
 qc_cfg <- config$qc
 num_qc <- function(x, default) {
   v <- suppressWarnings(as.numeric(x))
@@ -78,18 +86,28 @@ This report supports the **updated pipeline** using `build_files.smk` and `annot
 
 1. **Sex check** (main workflow): ChrX F-statistic; ambiguous samples excluded.
 2. **Variant QC (build)**: Geno, MAF, HWE, SNPs only per chromosome → `qc_filter2` (no LD on chr files).
-3. **Sample missingness (build)**: Per-chr missingness on `qc_filter2` → aggregate → MIND → merge autosomes to **merge_mind** (mind-passing samples only).
-4. **LD pruning (build)**: On **merge_mind** only (`--indep-pairwise`); chr8 + long-LD excluded. Produces `merge_mind.prune.in` / `.prune.out`; does **not** strip variants from **build**.
-5. **Heterozygosity (build)**: On **`merge_mind.pruned`** (LD-pruned SNP subset). Outliers → **build** = `merge_mind` minus those samples (full SNP set in `build`; chr8 retained for REGENIE).
-6. **PCA**: On **build** genotypes with **`--extract merge_mind.prune.in`** (and chr / long-LD exclusions in the PCA rule) → `build_pca.eigenvec` / `build_pca.eigenval` / **`build_pca.eigenvec.allele`** (`--pca … allele-wts`); **build** unchanged. Loading plots join **`build.pvar`** for **POS**.
+3. **Sample missingness (build)**: Per-chromosome missingness is computed on `qc_filter2`, then aggregated to apply the MIND threshold.
+   Samples passing MIND are merged across autosomes into **merge_mind**.
+4. **LD pruning (build)**: Performed on **merge_mind** only (`--indep-pairwise`; chr8 and long-LD regions excluded).
+   Output (`merge_mind.prune.in/.out`) is used for PCA and heterozygosity only and does not remove variants from the final **build** dataset.
+5. **Heterozygosity (build)**: Computed on **merge_mind.pruned** (the LD-pruned SNP subset from **merge_mind**).
+   Outlier samples are removed from **merge_mind** to create **build**, while keeping the full post-QC SNP set in **build**.
+6. **PCA**: Runs on **build** samples while restricting variants to `merge_mind.prune.in` (with chr/long-LD exclusions in the PCA rule).
+   Outputs include `build_pca.eigenvec`, `build_pca.eigenval`, and `build_pca.eigenvec.allele`; loading plots use positions from `build.pvar`.
 7. **Annotation (annotation_files)**: Subset to build passing samples → first VEP → exclude MNP from annotation VCF → MNP genotype path (split, correct, concat, sort) → two concat+sorts: genotype BCF and annotation VEP VCF → final annotation pgen and `annotation.no_sample.vep.report.csv`.
 8. **PCA outlier filtering**: Define outliers as **PC4 > 0.3**, then recompute clean PCA (`build_pca_clean.*`) for ancestry covariates and plots.
+
+Unless explicitly stated, filtering steps are cumulative, and counts reflect the dataset at that stage of the pipeline.
 
 ---
 
 # Load Data
 
-One **covariate file** (with header) supplies Status and Freeze for all QC views and for the pipeline: set `config: input: covariates: path/to/covariates.txt`. **Ancestry groups for PCA:** tab-separated **`anc_group.tsv`** (columns `FID`, `IID`, `AncGroup`). The report **loads `anc_group.tsv` automatically** if it sits next to **`exwas_qc_report2.Rmd`** or in **`getwd()`** when you knit; you can still override with **`params$anc_group_file`** or **`config.yml`** → **`input: anc_group`**. Values merge onto **`pca`** as **`AncGroup`** (and **`ANC`**) by **IID** (must match **`build_pca.eigenvec`**).
+A single covariate file (with header) supplies Status and Freeze for all QC views and pipeline steps.
+
+Ancestry groups for PCA are provided via a tab-separated `anc_group.tsv` file (`FID`, `IID`, `AncGroup`).
+
+The report attempts to automatically locate this file next to the Rmd or in the working directory. This behavior can be overridden via `params$anc_group_file` or `config.yml`.
 
 ```{r load-data}
 # If params/config did not set ancestry path, use anc_group.tsv next to this .Rmd or in getwd()
@@ -239,17 +257,44 @@ variant_hwe <- lapply(1:22, function(chr) {
   } else data.frame()
 }) %>% bind_rows()
 
-# Load variant type counts after MNP correction (annotation_files: same format as prefilter/postfilter)
+# Load variant type counts after MNP correction (same format as prefilter/postfilter).
+# Expects data/qc/reports/chr{1..22}.postmnp.variant_types.txt from count_variant_types_postmnp (annotation workflow).
+postmnp_paths <- file.path(DATA_DIR, "qc/reports", paste0("chr", 1:22, ".postmnp.variant_types.txt"))
+n_postmnp_files_present <- sum(file.exists(postmnp_paths))
 postmnp_counts <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "qc/reports", paste0("chr", chr, ".postmnp.variant_types.txt"))
+  f <- postmnp_paths[[chr]]
   if (file.exists(f)) {
-    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
+    read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "", strip.white = TRUE) %>%
       mutate(CHR = chr)
   } else {
     data.frame(TYPE = character(0), COUNT = numeric(0), CHR = integer(0))
   }
 }) %>% bind_rows()
-has_postmnp <- nrow(postmnp_counts) > 0 && "TYPE" %in% names(postmnp_counts) && "COUNT" %in% names(postmnp_counts)
+if (nrow(postmnp_counts) > 0 && "COUNT" %in% names(postmnp_counts)) {
+  postmnp_counts$COUNT <- suppressWarnings(as.numeric(gsub(",", "", trimws(as.character(postmnp_counts$COUNT)))))
+}
+has_postmnp <- nrow(postmnp_counts) > 0 &&
+  "TYPE" %in% names(postmnp_counts) &&
+  "COUNT" %in% names(postmnp_counts) &&
+  sum(!is.na(postmnp_counts$COUNT) & postmnp_counts$TYPE != "", na.rm = TRUE) > 0
+
+# MNP validation / read-check summary (wide TSV; optional)
+mnp_validation_metrics <- if (file.exists(MNP_VALIDATION_METRICS)) {
+  read.delim(MNP_VALIDATION_METRICS, sep = "\t", stringsAsFactors = FALSE, comment.char = "",
+               strip.white = TRUE, check.names = FALSE)
+} else {
+  data.frame()
+}
+has_mnp_validation_metrics <- nrow(mnp_validation_metrics) > 0
+if (has_mnp_validation_metrics && nrow(mnp_validation_metrics) == 1L) {
+  mnp_validation_metrics_long <- mnp_validation_metrics %>%
+    tidyr::pivot_longer(dplyr::everything(), names_to = "metric", values_to = "value") %>%
+    mutate(value = suppressWarnings(as.numeric(value)))
+} else if (has_mnp_validation_metrics) {
+  mnp_validation_metrics_long <- mnp_validation_metrics
+} else {
+  mnp_validation_metrics_long <- data.frame()
+}
 
 # Rename sex inference Status column to Sex first
 colnames(sex_report)[colnames(sex_report) == "Status"] <- "Sex"
@@ -388,11 +433,13 @@ if (file.exists(pca_exc_path) && file.info(pca_exc_path)$size > 0L) {
 
 ## Method
 
-Sex is inferred from chromosome X heterozygosity using the F-statistic:
+Sex is inferred from chromosome X heterozygosity using the F-statistic (PLINK-based inbreeding coefficient on chrX):
 
 - **F > 0.8**: Male (mostly homozygous/hemizygous on X)
 - **F < 0.2**: Female (heterozygous on X)
 - **0.2 ≤ F ≤ 0.8**: Ambiguous/Problem (excluded)
+
+Samples in the ambiguous range are excluded because they may represent sample swaps, aneuploidy, or poor-quality genotype data.
 
 ```{r sex-check-summary}
 sex_fail <- sex_report %>% filter(Sex == "AMBIGUOUS")
@@ -404,6 +451,8 @@ passing_samples <- nrow(sex_pass)
 ```
 
 ## Results
+
+Percentages are computed relative to the input at each step; if an input count is zero, percentages may be undefined.
 
 - **Total Samples**: `r format(total_samples, big.mark = ",")`
 - **Failed Sex Check**: `r format(failed_samples, big.mark = ",")` (`r round(100 * failed_samples / total_samples, 2)`%)
@@ -666,7 +715,106 @@ if (nrow(variant_hwe) > 0 && "P" %in% names(variant_hwe)) {
 
 # 3b. MNP Correction
 
-Multi-nucleotide variants (MNPs) are identified from VEP annotation, and genotypes are corrected. The counts below are from the **MNP-corrected** BCF (same `count_variant_types` logic as prefilter/postfilter), so you see SNP, INDEL, MNP, and OTHER in the annotation dataset after correction.
+Multi-nucleotide variants (MNPs) are identified and corrected during annotation.
+
+This step:
+- Identifies candidate variant pairs from VEP output
+- Validates cis/trans configuration using read-level evidence
+- Updates genotypes accordingly
+
+Counts below reflect the post-correction dataset.
+
+**MNP validation summary** (`mnp.validation.metrics.tsv`) is loaded when present (path: `r MNP_VALIDATION_METRICS`). **Post-MNP variant-type files** are expected at `data/qc/reports/chrN.postmnp.variant_types.txt` for `N = 1..22` (from `count_variant_types_postmnp` in the annotation workflow).
+
+Read-check terms used in the table:
+- **Total_Reads**: all reads retrieved in the query window (after filtering settings such as MAPQ).
+- **Reads_with_Both**: reads supporting both variants together (same-read cis support).
+- **Trans_Evidence**: reads supporting only one variant at a time (supports trans/mixed patterns).
+- **Phaseable_Reads**: informative reads used for cis/trans assessment (`Reads_with_Both + Trans_Evidence`).
+- **Strong_Cis_Default**: strict cis call (`Reads_with_Both >= 3`, `Phaseable_Reads >= 5`, and `Cis_Fraction_Phaseable >= 0.90`).
+
+```{r mnp-validation-metrics-table}
+if (has_mnp_validation_metrics) {
+  if (nrow(mnp_validation_metrics) == 1L &&
+      nrow(mnp_validation_metrics_long) > 0 &&
+      "metric" %in% colnames(mnp_validation_metrics_long)) {
+    metric_labels <- c(
+      n_mnp_candidates_identified_pairs = "Candidate MNP pairs (pre-filter)",
+      n_vaf_pass_pairs = "Pairs passing VAF/sample criteria",
+      n_vaf_pass_rows = "VAF-pass observations (pair-sample rows)",
+      n_read_validation_targets_assigned = "Pairs selected for read validation",
+      n_read_validations_performed_rows = "Read validations performed (rows)",
+      n_unique_pairs_validated = "Pairs with read-level result",
+      n_strong_cis_rows = "Strong cis rows",
+      n_not_strong_cis_rows = "Not-strong-cis rows",
+      n_strong_cis_unique_pairs = "Pairs meeting strong cis threshold",
+      n_cis_only_rows = "Read outcomes: cis-only",
+      n_mixed_cis_trans_rows = "Read outcomes: mixed cis/trans",
+      n_trans_only_rows = "Read outcomes: trans-only",
+      n_no_phaseable_rows = "Read outcomes: non-phaseable",
+      n_zero_total_reads_rows = "Read outcomes: zero total reads"
+    )
+    metric_stage <- c(
+      n_mnp_candidates_identified_pairs = "Candidate identification",
+      n_vaf_pass_pairs = "VAF/sample gate",
+      n_vaf_pass_rows = "VAF/sample gate",
+      n_read_validation_targets_assigned = "Read-check assignment",
+      n_read_validations_performed_rows = "Read-check results",
+      n_unique_pairs_validated = "Read-check results",
+      n_strong_cis_rows = "Read-check classification",
+      n_not_strong_cis_rows = "Read-check classification",
+      n_strong_cis_unique_pairs = "Read-check classification",
+      n_cis_only_rows = "Read-check outcomes",
+      n_mixed_cis_trans_rows = "Read-check outcomes",
+      n_trans_only_rows = "Read-check outcomes",
+      n_no_phaseable_rows = "Read-check outcomes",
+      n_zero_total_reads_rows = "Read-check outcomes"
+    )
+    metric_notes <- c(
+      n_mnp_candidates_identified_pairs = "Unique (id1,id2) candidate pairs from find_mnp_variants",
+      n_vaf_pass_pairs = "Unique pairs with at least one PASS row",
+      n_vaf_pass_rows = "Total PASS rows (pair-sample observations)",
+      n_read_validation_targets_assigned = "Rows assigned for read-level validation",
+      n_read_validations_performed_rows = "Rows emitted by read-check results file",
+      n_unique_pairs_validated = "Unique pairs represented in read-check results",
+      n_strong_cis_rows = "Rows with Strong_Cis_Default == 1",
+      n_not_strong_cis_rows = "Rows with Strong_Cis_Default != 1",
+      n_strong_cis_unique_pairs = "Unique strong-cis pairs",
+      n_cis_only_rows = "Reads_with_Both > 0 and Trans_Evidence == 0",
+      n_mixed_cis_trans_rows = "Reads_with_Both > 0 and Trans_Evidence > 0",
+      n_trans_only_rows = "Reads_with_Both == 0 and Trans_Evidence > 0",
+      n_no_phaseable_rows = "Phaseable_Reads == 0",
+      n_zero_total_reads_rows = "Total_Reads == 0"
+    )
+    mnp_validation_pretty <- mnp_validation_metrics_long %>%
+      mutate(
+        stage = dplyr::coalesce(metric_stage[metric], "Other"),
+        metric_label = dplyr::coalesce(metric_labels[metric], metric),
+        note = dplyr::coalesce(metric_notes[metric], ""),
+        value = suppressWarnings(as.numeric(value))
+      ) %>%
+      arrange(factor(stage, levels = c("Candidate identification", "VAF/sample gate", "Read-check assignment", "Read-check results", "Read-check classification", "Read-check outcomes", "Other")))
+    kable(
+      mnp_validation_pretty %>% select(stage, metric_label, value, note),
+      format.args = list(big.mark = ","),
+      caption = "MNP validation metrics (mnp.validation.metrics.tsv)",
+      col.names = c("Stage", "Metric", "Value", "Definition")
+    )
+  } else {
+    kable(
+      mnp_validation_metrics,
+      format.args = list(big.mark = ","),
+      caption = "MNP validation metrics (mnp.validation.metrics.tsv)"
+    )
+  }
+} else {
+  cat(
+    "MNP validation metrics not found at: ", MNP_VALIDATION_METRICS,
+    "\n(Add `data/mnp/mnp.validation.metrics.tsv` from your MNP pipeline, or set YAML param `mnp_validation_metrics` to the file path.)\n",
+    sep = ""
+  )
+}
+```
 
 ```{r postmnp-summary}
 if (has_postmnp) {
@@ -679,7 +827,10 @@ if (has_postmnp) {
 } else {
   postmnp_total <- 0
   postmnp_by_type <- data.frame(TYPE = character(0), COUNT = numeric(0))
-  cat("Post-MNP variant type counts not found (pipeline may not have run the MNP correction step).\n")
+  cat("Post-MNP per-chromosome variant-type counts are not available.\n")
+  cat("- **Files present**: ", n_postmnp_files_present, " of 22 (`data/qc/reports/chr*.postmnp.variant_types.txt`).\n", sep = "")
+  cat("- **Typical cause**: `count_variant_types_postmnp` was not run for this project, or the report was knitted before/with a different `data_dir` than the pipeline output.\n")
+  cat("- **Fix**: Ensure the annotation workflow emits those 22 files (e.g. `annotation_files` includes `postmnp_stats`, or run `generate_qc_report` so Snakemake builds them as dependencies).\n")
 }
 ```
 
@@ -746,6 +897,8 @@ if ("Status" %in% colnames(miss_report) && sum(!is.na(miss_report$Status)) > 0) 
 ## Missingness Distribution
 
 **WARNING**: If a large proportion of cases are failing, check the distribution below. The threshold may be too stringent or there may be a data quality issue.
+
+A systematic shift (e.g., cases consistently higher than controls) typically indicates batch effects or alignment/capture differences rather than random missingness.
 
 ```{r missingness-distribution, fig.height=5}
 # Load aggregated missingness to see all samples
@@ -878,7 +1031,9 @@ if (nrow(case_miss) > 0) {
 
 ## Method
 
-In `build_files.smk`, per-chromosome SNP filters produce `qc_filter2`; sample missingness (MIND) is applied; chromosomes are merged to **`merge_mind`** (mind-passing samples only). **LD pruning runs on `merge_mind`**, not on per-chr files: `--indep-pairwise 200 20 0.2`, excluding chromosome 8 and long-LD regions (e.g. HLA, 17q21.31). Outputs include `merge_mind.prune.in` and `merge_mind.prune.out`. This step **does not** drop variants from the final **`build`** genotype file; it defines an independent SNP list for PCA and for **`merge_mind.pruned`**, on which heterozygosity is computed (see next section).
+In `build_files.smk`, per-chromosome SNP filters produce `qc_filter2`; sample missingness (MIND) is applied; chromosomes are merged to **`merge_mind`** (mind-passing samples only). **LD pruning runs on `merge_mind`**, not on per-chr files: `--indep-pairwise 200 20 0.2`, excluding chromosome 8 and long-LD regions (e.g. HLA, 17q21.31). Outputs include `merge_mind.prune.in` and `merge_mind.prune.out`.
+
+This step does not remove variants from the final dataset. It only defines a subset of approximately independent SNPs for downstream statistical calculations (PCA and heterozygosity).
 
 ```{r ld-pruning-merge-mind}
 ld_prune_summary <- data.frame(CHR = integer(0), Variants_Removed = numeric(0))
@@ -974,7 +1129,9 @@ if (nrow(ld_prune_summary) > 0) {
 
 ## Method
 
-Heterozygosity is computed on the **LD-pruned** subset **`merge_mind.pruned`** (from `merge_mind` + `merge_mind.prune.in`), matching `build_files.smk`. Outliers (mean ± 3 SD on F) are flagged; **`build`** is `merge_mind` with those samples removed—the **full** SNP set is retained in `build` for association testing.
+Heterozygosity is computed on the LD-pruned SNP subset to avoid inflation due to linkage disequilibrium.
+
+Operationally, this is **`merge_mind.pruned`** (from **`merge_mind`** + `merge_mind.prune.in`), matching `build_files.smk`. Outliers (mean ± 3 SD on F) are flagged; **`build`** is **`merge_mind`** with those samples removed, while retaining the full SNP set for association testing.
 
 ```{r het-summary}
 total_after_miss <- passing_missingness
@@ -1054,9 +1211,13 @@ _Final sample count is shown after the PCA sections._
 
 # 7. Population Structure (PCA)
 
-PCA uses genotype data from **`build`** (final analysis set: `merge_mind` minus heterozygosity outliers) but restricts variants to the **independent SNP list** from **`merge_mind.prune.in`** (see Section 5), with **chromosome 8 and long-LD regions excluded** (chr 1–7, 9–22) in the PCA step. That matches `build_files.smk` (`calculate_pca`): the **build** files are not LD-pruned; only the PCA eigenanalysis uses the pruned list. Outputs: `build_pca.eigenvec`, `build_pca.eigenval`, **`build_pca.eigenvec.allele`** (allele PC weights; positions for the diagnostic loading plots come from **`build.pvar`**). **Ancestry-group plots** use **`AncGroup`** from the file set in **`params$anc_group_file`** / **`config: input: anc_group`**, merged by **`IID`** in Load Data.
+PCA uses genotype data from **`build`** samples, but restricts variants to the LD-pruned SNP subset (`merge_mind.prune.in`).
 
-### PCA outlier rule and clean PCA
+This ensures population structure is estimated using independent variants, while preserving the full dataset for downstream association testing.
+
+That matches `build_files.smk` (`calculate_pca`): **`build`** is not LD-pruned; only the PCA eigenanalysis uses the pruned list, with chromosome 8 and long-LD regions excluded (chr 1–7, 9–22). Outputs include `build_pca.eigenvec`, `build_pca.eigenval`, and `build_pca.eigenvec.allele` (allele PC weights; diagnostic loading plots use positions from `build.pvar`). Ancestry-group plots use `AncGroup` from `params$anc_group_file` or `config: input: anc_group`, merged by `IID` in Load Data.
+
+## PCA outlier rule and clean PCA
 
 - **Outlier definition:** samples with **raw PC4 > 0.3** in **`build_pca.eigenvec`** (not z-score based).
 - **Files:** `qc/exclusions/pca_outliers.txt` + `qc/reports/pca_outlier_report.txt`.
@@ -1077,7 +1238,7 @@ if (file.exists(p_pca1)) knitr::include_graphics(p_pca1)
 if (file.exists(p_pca4)) knitr::include_graphics(p_pca4)
 ```
 
-## Principal Components
+## PCA scatterplots and variance explained
 
 ```{r pca-summary}
 # Calculate variance explained (build_files: build_pca.eigenval)
@@ -1090,7 +1251,7 @@ eigenval$PC <- paste0("PC", seq_len(nrow(eigenval)))
 eigenval$Variance_Explained <- 100 * eigenval$Eigenvalue / sum(eigenval$Eigenvalue)
 ```
 
-### Variance Explained
+### Variance explained
 
 ```{r variance-explained, fig.height=5}
 ggplot(eigenval[1:10, ], aes(x = factor(PC, levels = PC), y = Variance_Explained)) +
@@ -1138,7 +1299,7 @@ if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na
 }
 ```
 
-### PC1 vs PC2 by AncGroup
+### PC1 vs PC2 by ancestry group
 
 ```{r pca-plot-pc1-pc2-ancgroup, fig.height=6.5, fig.width=9}
 if (exists("has_anc_group") && has_anc_group) {
@@ -1206,7 +1367,7 @@ if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na
 }
 ```
 
-### PC3 vs PC4 by AncGroup
+### PC3 vs PC4 by ancestry group
 
 ```{r pca-plot-pc3-pc4-ancgroup, fig.height=6.5, fig.width=9}
 if (exists("has_anc_group") && has_anc_group) {
@@ -1230,7 +1391,7 @@ if (exists("has_anc_group") && has_anc_group) {
 }
 ```
 
-### Scree Plot (All 20 PCs)
+### Scree plot (all 20 PCs)
 
 ```{r scree-plot, fig.height=5}
 ggplot(eigenval, aes(x = seq_len(nrow(eigenval)), y = Eigenvalue)) +
@@ -1622,6 +1783,15 @@ ggplot(exclusion_data, aes(x = factor(Stage, levels = Stage), y = Samples)) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
+
+## Final Dataset Definition
+
+The final analysis dataset (**`build`**) includes:
+
+- Samples passing sex check, missingness, and heterozygosity filters
+- All SNPs passing variant QC (no LD pruning applied)
+
+PCA outlier removal affects only ancestry covariates, not the underlying genotype dataset.
 
 ---
 

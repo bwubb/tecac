@@ -10,10 +10,13 @@ os.makedirs("data/regenie",exist_ok=True)
 PROJECT_NAME=config['project']['name']
 CHROMOSOMES_AUTOSOMAL=list(range(1,23)) # Chromosomes 1-22
 
-with open(config['input'].get('ancestry_file','data/preprocess/build_pca.eigenvec'),'r') as f:
+with open(config['input'].get('ancestry_file','data/preprocess/build_pca_clean.eigenvec'),'r') as f:
     header=f.readline().strip()
-    DM_COUNT=len(header.split())-2
-    print(f"{DM_COUNT} Ancestry dimensions found.")
+    DM_FOUND=len(header.split())-2
+
+DM_TARGET=int(config.get('regenie',{}).get('dm_count',10))
+DM_COUNT=min(DM_FOUND,DM_TARGET)
+print(f"{DM_FOUND} ancestry dimensions found; using {DM_COUNT} for REGENIE covariates.")
 
 localrules:create_vep_list
 wildcard_constraints:
@@ -57,7 +60,9 @@ rule preprocess_regenie:
         pheno="data/regenie/regenie.pheno.txt"
     params:
         covariates=config['input'].get('covariates','covariates.txt'),
-        ancestry=config['input'].get('ancestry_file','data/preprocess/build_pca.eigenvec'),
+        ancestry=config['input'].get('ancestry_file','data/preprocess/build_pca_clean.eigenvec'),
+        negative_control_blacklist="data/mnp/mnp_blacklist.txt",
+        dm_count=DM_COUNT,
         output_prefix="data/regenie",
     shell:
         """
@@ -66,7 +71,9 @@ rule preprocess_regenie:
         --samples {input.samples} \
         -O {params.output_prefix} \
         --covariates {params.covariates} \
-        --ancestry-file {params.ancestry}
+        --ancestry-file {params.ancestry} \
+        --negative-control-blacklist {params.negative_control_blacklist} \
+        --dm-count {params.dm_count}
         """
 
 rule run_step1_regenie:
@@ -172,7 +179,8 @@ rule regenie_report:
     input:
         single_variant=expand("data/final/{{PROJECT}}.chr{CHR}.step2_single_variant_STATUS.regenie",CHR=CHROMOSOMES_AUTOSOMAL),
         gene_based=expand("data/final/{{PROJECT}}.chr{CHR}.step2_gene_based_STATUS.regenie",CHR=CHROMOSOMES_AUTOSOMAL),
-        pathogenic="data/final/{PROJECT}.pathogenic_vus.csv"
+        pathogenic="data/final/{PROJECT}.pathogenic_vus.csv",
+        blacklist="data/mnp/mnp_blacklist.txt"
     output:
         "data/final/{PROJECT}.regenie_report.html"
     shell:

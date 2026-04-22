@@ -1097,6 +1097,45 @@ if ("Status" %in% colnames(sex_report) && sum(!is.na(sex_report$Status)) > 0) {
   final_cases <- postmiss_cases - het_fail_cases
   final_controls <- postmiss_controls - het_fail_controls
 }
+
+# Final cohort / exclusions by Freeze and Status
+final_freeze_status <- NULL
+excluded_freeze_status <- NULL
+if (exists("has_freeze") && has_freeze &&
+    "Freeze" %in% colnames(sex_pass) &&
+    "Status" %in% colnames(sex_pass)) {
+  miss_fail_iid <- if ("IID" %in% colnames(miss_report)) trimws(as.character(miss_report$IID)) else character(0)
+  het_fail_iid  <- if ("IID" %in% colnames(het_report)) trimws(as.character(het_report$IID)) else character(0)
+  fail_iid <- unique(c(miss_fail_iid, het_fail_iid))
+
+  final_df <- sex_pass %>%
+    mutate(IID = trimws(as.character(IID))) %>%
+    filter(!(IID %in% fail_iid))
+
+  final_freeze_status <- final_df %>%
+    mutate(
+      Freeze = ifelse(is.na(Freeze) | trimws(Freeze) == "", "Unknown", as.character(Freeze)),
+      Status = ifelse(is.na(Status) | trimws(Status) == "", "Unknown", as.character(Status))
+    ) %>%
+    count(Freeze, Status, name = "N") %>%
+    tidyr::pivot_wider(names_from = Status, values_from = N, values_fill = 0L) %>%
+    mutate(Total = rowSums(across(where(is.numeric)))) %>%
+    arrange(Freeze)
+
+  excluded_freeze_status <- anti_join(
+      sex_pass %>% mutate(IID = trimws(as.character(IID))),
+      final_df %>% select(IID),
+      by = "IID"
+    ) %>%
+    mutate(
+      Freeze = ifelse(is.na(Freeze) | trimws(Freeze) == "", "Unknown", as.character(Freeze)),
+      Status = ifelse(is.na(Status) | trimws(Status) == "", "Unknown", as.character(Status))
+    ) %>%
+    count(Freeze, Status, name = "N") %>%
+    tidyr::pivot_wider(names_from = Status, values_from = N, values_fill = 0L) %>%
+    mutate(Total_Excluded = rowSums(across(where(is.numeric)))) %>%
+    arrange(Freeze)
+}
 ```
 
 ## Summary
@@ -1127,6 +1166,24 @@ if (exists("start_cases")) {
   kable(exclusion_breakdown,
         caption = "Sample Exclusions by QC Stage and Case/Control Status",
         col.names = c("QC Stage", "Cases Excluded", "Controls Excluded", "Total Excluded", "% Cases"))
+}
+```
+
+### Final Samples by Freeze
+
+```{r final-by-freeze}
+if (!is.null(final_freeze_status) && nrow(final_freeze_status) > 0) {
+  kable(final_freeze_status,
+        caption = "Final Samples by Freeze and Case/Control Status (after sex, missingness, and heterozygosity filters)")
+}
+```
+
+### Excluded Samples by Freeze
+
+```{r excluded-by-freeze}
+if (!is.null(excluded_freeze_status) && nrow(excluded_freeze_status) > 0) {
+  kable(excluded_freeze_status,
+        caption = "Samples Excluded by Freeze and Case/Control Status (from post-sex-pass cohort)")
 }
 ```
 

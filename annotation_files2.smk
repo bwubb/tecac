@@ -1,11 +1,13 @@
 # =============================================================================
-# ANNOTATION FILES (NO MNP PATH): quick A/B test pipeline
+# ANNOTATION FILES (annotation_files2.smk)
 # =============================================================================
-# Purpose:
-# - Keep the same downstream output filenames used by the rest of the pipeline.
-# - Bypass all MNP-specific split/correction/concat logic.
-# - Use the first VEP output directly as final annotation VEP.
+# - Passing-sample subset → het_miss BCF + no-sample VCF; VEP that track for QC CSVs.
+# - Post-MNP-adjusted genotypes: no-sample VCF for PLINK, VEP on mnp_gt BCF, staged
+#   copy to preprocess/.../annotation.no_sample.vep.vcf for downstream, then CSV parse.
+# - adjust_mnp_gt inputs may be produced by a separate pipeline; rule is unchanged here.
 # =============================================================================
+
+include: "mnp.smk"
 
 CHROMOSOMES_AUTOSOMAL=list(range(1,23))
 
@@ -20,23 +22,18 @@ rule annotation_files:
         expand("data/preprocess/chr{CHR}.annotation.no_sample.vep.vcf",CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/preprocess/chr{CHR}.annotation.no_sample.vep.report.csv",CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.report.csv",CHR=CHROMOSOMES_AUTOSOMAL),
-        #postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
+        postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
 
 # -----------------------------------------------------------------------------
 # 1. Subset to passing samples only (from build). Output: BCF + no-sample VCF.
 # -----------------------------------------------------------------------------
-rule bcftools_annotation_subset:
-    wildcard_constraints:
-        CHR='[0-9]+'
+rule bcftools_subset_passing_het_miss:
     input:
         bcf="data/bcftools/chr{CHR}.qc_filter1.bcf",
         samples="data/qc/passing_samples.txt"
     output:
         bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf",
         vcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vcf"
-    resources:
-        lsf_err="logs/lsf/bcftools_annotation_subset.chr{CHR}.e",
-        lsf_out="logs/lsf/bcftools_annotation_subset.chr{CHR}.o"
     shell:
         """
         bcftools view -S {input.samples} -a -Ob -W=csi -o {output.bcf} {input.bcf}
@@ -46,17 +43,13 @@ rule bcftools_annotation_subset:
 # -----------------------------------------------------------------------------
 # 2. First VEP annotation (used directly as final annotation VEP in NO-MNP mode).
 # -----------------------------------------------------------------------------
-rule first_variants_annotation:
-    wildcard_constraints:
-        CHR='[0-9]+'
+rule first_variant_annotation:
     input:
-       "data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vcf"
+        "data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vcf"
     output:
         "data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.vcf"
     resources:
-        mem_mb=32000,
-        lsf_err="logs/lsf/first_variants_annotation.chr{CHR}.e",
-        lsf_out="logs/lsf/first_variants_annotation.chr{CHR}.o"
+        mem_mb=32000
     shell:
         """
         export SINGULARITY_TMPDIR=/scratch/$USER/sing_tmp
@@ -87,7 +80,7 @@ rule first_variants_annotation:
         --plugin MaveDB,file=/opt/vep/.vep/mavedb/MaveDB_variants.tsv.gz
         """
 
-rule parse_first_variants_annotation:
+rule parse_first_variant_annotation:
     input:
         "data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.vcf"
     output:
@@ -96,46 +89,45 @@ rule parse_first_variants_annotation:
         "python vep_vcf_parser2.py -i {input} -o {output} -m no_sample"
 
 
-#MNP pipeline:
+#MNP pipeline: Happens elswhere, leave it alone.
 
-rule set_final_annotation_vep:
-    wildcard_constraints:
-        CHR='[0-9]+'
+rule adjust_mnp_vep:
     input:
-        "data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.vcf"
+        vcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.vcf",
+        ids="data/mnp/chr{CHR}.mnp_sample_info.read_check_filtered.PASS.id",
+        mnp_vcf="data/mnp/chr{CHR}.mnp.pass.no_sample.sorted.vep.vcf"
     output:
-        "data/preprocess/chr{CHR}.annotation.no_sample.vep.vcf"
-    shell:
-        "cp {input} {output}"
-
-# -----------------------------------------------------------------------------
-# 3. Un-annotated no_sample VCF; PLINK annotation pgen/pvar/psam (NO-MNP BCF).
-# -----------------------------------------------------------------------------
-rule bcftools_annotation2_vcf:
-    wildcard_constraints:
-        CHR='[0-9]+'
-    input:
-        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf"
-    output:
-        vcf="data/preprocess/chr{CHR}.annotation.no_sample.vcf"
-    resources:
-        lsf_err="logs/lsf/bcftools_annotation2_vcf.chr{CHR}.e",
-        lsf_out="logs/lsf/bcftools_annotation2_vcf.chr{CHR}.o"
+        not_mnp="data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.not_mnp.bcf",
+        tmp="data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.tmp.bcf",
+        mnp="data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.mnp.vcf"
     shell:
         """
-        bcftools view -G -Ov -o {output.vcf} {input.bcf}
+        bcftools view -e 'ID=@{input.ids}' -Ob -W=csi -o{output.not_mnp} {input.vcf}
+        bcftools view -Ob -W=csi -o {output.tmp} {input.mnp_vcf}
+        bcftools concat -a {output.tmp} {output.not_mnp} | bcftools sort -Ov -o {output.mnp}
+        """
+
+rule adjust_mnp_gt:
+    input:
+        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf",
+        ids="data/mnp/chr{CHR}.mnp_sample_info.read_check_filtered.PASS.id",
+        mnp="data/mnp/chr{CHR}.mnp.pass.gt.sorted.bcf"
+    output:
+        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.mnp.gt.bcf",
+        csi="data/bcftools/chr{CHR}.qc_filter1.het_miss.mnp.gt.bcf.csi",
+        not_mnp="data/bcftools/chr{CHR}.qc_filter1.het_miss.not_mnp.bcf"
+    shell:
+        """
+        bcftools view -e 'ID=@{input.ids}' -W=csi -Ob -o {output.not_mnp} {input.bcf}
+        bcftools concat -Ob -a {input.mnp} {output.not_mnp} | bcftools sort -Ob -o {output.bcf}
+        bcftools index {output.bcf}
         """
 
 rule count_variant_types_postmnp:
-    wildcard_constraints:
-        CHR='[0-9]+'
     input:
-        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf"
+        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.mnp.gt.bcf"
     output:
         "data/qc/reports/chr{CHR}.postmnp.variant_types.txt"
-    resources:
-        lsf_err="logs/lsf/count_variant_types_postmnp.chr{CHR}.e",
-        lsf_out="logs/lsf/count_variant_types_postmnp.chr{CHR}.o"
     shell:
         """
         echo "TYPE COUNT" > {output}
@@ -147,38 +139,42 @@ rule count_variant_types_postmnp:
         """
 
 rule plink2_annotation_pgen:
-    wildcard_constraints:
-        CHR='[0-9]+'
     input:
-        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.bcf",
+        bcf="data/bcftools/chr{CHR}.qc_filter1.het_miss.mnp.gt.bcf",
         sex_file="data/plink/chrX.sex_update.txt"
     output:
         pgen="data/preprocess/chr{CHR}.annotation.pgen",
         pvar="data/preprocess/chr{CHR}.annotation.pvar",
         psam="data/preprocess/chr{CHR}.annotation.psam"
     params:
-        output_prefix="data/preprocess/chr{CHR}.annotation"
-    resources:
-        lsf_err="logs/lsf/plink2_annotation_pgen.chr{CHR}.e",
-        lsf_out="logs/lsf/plink2_annotation_pgen.chr{CHR}.o"
+        output_prefix="data/preprocess/chr{CHR}.annotation" 
     shell:
         """
         plink2 --bcf {input.bcf} --update-sex {input.sex_file} --double-id --vcf-half-call reference --make-pgen --out {params.output_prefix}
         """
 
 # -----------------------------------------------------------------------------
-# 4. Parse final annotation VEP to report CSV.
+# 5. Copy post-MNP VEP to preprocess path (stable filename for downstream).
 # -----------------------------------------------------------------------------
-rule parse_vep:
-    wildcard_constraints:
-        CHR='[0-9]+'
+rule stage_preprocess_annotation_no_sample_vep:
+    input:
+        "data/bcftools/chr{CHR}.qc_filter1.het_miss.no_sample.vep.mnp.vcf"
+    output:
+        "data/preprocess/chr{CHR}.annotation.no_sample.vep.vcf"
+    shell:
+        "cp -f {input} {output}"
+
+# -----------------------------------------------------------------------------
+# 6. Parse final annotation VEP to report CSV.
+# -----------------------------------------------------------------------------
+rule parse_annotation_no_sample_vep:
     input:
         "data/preprocess/chr{CHR}.annotation.no_sample.vep.vcf"
     output:
         "data/preprocess/chr{CHR}.annotation.no_sample.vep.report.csv"
     resources:
         mem_mb=32000,
-        lsf_err="logs/lsf/parse_vep.chr{CHR}.e",
-        lsf_out="logs/lsf/parse_vep.chr{CHR}.o"
+        lsf_err="logs/lsf/parse_annotation_no_sample_vep.chr{CHR}.e",
+        lsf_out="logs/lsf/parse_annotation_no_sample_vep.chr{CHR}.o"
     shell:
         "python vep_vcf_parser2.py -i {input} -o {output} -m no_sample"

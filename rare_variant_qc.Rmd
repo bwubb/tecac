@@ -1,0 +1,234 @@
+---
+title: "Rare Variant QC by Freeze (controls only)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,warning=FALSE,message=FALSE)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(knitr)
+```
+
+```{r files}
+base_dir<-"data/qc/rare_variant_qc"
+chr_files<-list.files(base_dir,pattern="^chr[0-9]+\\.rare_variant_qc\\.tsv$",full.names=TRUE)
+out_all<-file.path(base_dir,"rare_variant_qc.freeze2_vs_freeze3.all.tsv")
+out_flagged<-file.path(base_dir,"rare_variant_qc.freeze2_vs_freeze3.flagged.tsv")
+pathogenic_vus_file<-"data/regenie/pathogenic_vus.csv"
+
+if(length(chr_files)==0){
+  stop("No per-chromosome rare variant QC files found.")
+}
+frames<-lapply(chr_files,function(f) read_tsv(f,show_col_types=FALSE))
+qc_all<-bind_rows(frames)
+qc_flagged<-qc_all %>% filter(flag==1)
+write_tsv(qc_all,out_all)
+write_tsv(qc_flagged,out_flagged)
+
+pv<-read_csv(pathogenic_vus_file,show_col_types=FALSE) %>%
+  select(ID,Gene,Variant.LoF_level) %>%
+  distinct() %>%
+  mutate(variant_set=case_when(
+    Variant.LoF_level==1~"pathogenic",
+    Variant.LoF_level==2~"vus",
+    TRUE~"other"
+  ))
+qc_all_pv<-qc_all %>% inner_join(pv,by=c("variant_id"="ID"))
+qc_flagged_pv<-qc_flagged %>% inner_join(pv,by=c("variant_id"="ID"))
+```
+
+## Overview
+
+```{r overview}
+overview<-tibble(
+  metric=c(
+    "Total variants tested",
+    "Flagged variants",
+    "Fraction flagged"
+  ),
+  value=c(
+    nrow(qc_all),
+    nrow(qc_flagged),
+    ifelse(nrow(qc_all)>0,sprintf("%.3f",nrow(qc_flagged)/nrow(qc_all)),"NA")
+  )
+)
+kable(overview)
+```
+
+## Flag Reasons
+
+```{r reasons}
+if(nrow(qc_flagged)==0){
+  cat("No flagged variants.")
+} else {
+  reason_tbl<-qc_flagged %>%
+    mutate(flag_reasons=ifelse(is.na(flag_reasons)|flag_reasons=="","none",flag_reasons)) %>%
+    separate_rows(flag_reasons,sep=",") %>%
+    count(flag_reasons,sort=TRUE)
+  kable(reason_tbl)
+}
+```
+
+## Variant Type Summary
+
+```{r variant-type-summary}
+type_total<-qc_all %>%
+  group_by(variant_type) %>%
+  summarise(total_variants=n(),.groups='drop')
+type_flagged<-qc_flagged %>%
+  group_by(variant_type) %>%
+  summarise(flagged_variants=n(),.groups='drop')
+type_summary<-type_total %>%
+  left_join(type_flagged,by="variant_type") %>%
+  mutate(flagged_variants=ifelse(is.na(flagged_variants),0,flagged_variants))
+kable(type_summary)
+```
+
+## Flag Reasons By Variant Type
+
+```{r reason-by-type}
+if(nrow(qc_flagged)==0){
+  cat("No flagged variants.")
+} else {
+  reason_by_type<-qc_flagged %>%
+    mutate(flag_reasons=ifelse(is.na(flag_reasons)|flag_reasons=="","none",flag_reasons)) %>%
+    separate_rows(flag_reasons,sep=",") %>%
+    count(variant_type,flag_reasons,sort=TRUE)
+  kable(reason_by_type)
+}
+```
+
+## Sparse Carrier Summary
+
+```{r sparse-summary}
+if(nrow(qc_flagged)==0){
+  cat("No flagged variants.")
+} else {
+  sparse_tbl<-tibble(
+    group=c("total_called_carriers==1","total_called_carriers==2","total_called_carriers>=3"),
+    n=c(
+      sum(qc_flagged$total_called_carriers==1,na.rm=TRUE),
+      sum(qc_flagged$total_called_carriers==2,na.rm=TRUE),
+      sum(qc_flagged$total_called_carriers>=3,na.rm=TRUE)
+    )
+  )
+  kable(sparse_tbl)
+}
+```
+
+## Top Flagged Variants
+
+```{r top-flagged}
+if(nrow(qc_flagged)==0){
+  cat("No flagged variants.")
+} else {
+  top_flagged<-qc_flagged %>%
+    arrange(missing_fisher_p,carrier_fisher_p,desc(abs_missing_rate_diff),desc(abs_carrier_rate_diff)) %>%
+    select(
+      variant_id,
+      variant_type,
+      f2_missing_rate,
+      f3_missing_rate,
+      abs_missing_rate_diff,
+      missing_fisher_p,
+      f2_carrier_rate_called,
+      f3_carrier_rate_called,
+      abs_carrier_rate_diff,
+      carrier_fisher_p,
+      total_called_carriers,
+      flag_reasons
+    ) %>%
+    head(100)
+  kable(top_flagged)
+}
+```
+
+## Top Missingness Imbalance
+
+```{r top-missing}
+if(nrow(qc_all)==0){
+  cat("No variants to display.")
+} else {
+  top_missing<-qc_all %>%
+    arrange(desc(abs_missing_rate_diff),missing_fisher_p) %>%
+    select(
+      variant_id,variant_type,
+      f2_n_total,f2_n_missing,f2_missing_rate,
+      f3_n_total,f3_n_missing,f3_missing_rate,
+      abs_missing_rate_diff,missing_fisher_p,flag,flag_reasons
+    ) %>%
+    head(50)
+  kable(top_missing)
+}
+```
+
+## Top Carrier Imbalance
+
+```{r top-carrier}
+if(nrow(qc_all)==0){
+  cat("No variants to display.")
+} else {
+  top_carrier<-qc_all %>%
+    arrange(desc(abs_carrier_rate_diff),carrier_fisher_p) %>%
+    select(
+      variant_id,variant_type,
+      f2_n_called,f2_n_carrier,f2_carrier_rate_called,
+      f3_n_called,f3_n_carrier,f3_carrier_rate_called,
+      abs_carrier_rate_diff,carrier_fisher_p,total_called_carriers,flag,flag_reasons
+    ) %>%
+    head(50)
+  kable(top_carrier)
+}
+```
+
+## Pathogenic/VUS Summary
+
+```{r pv-summary}
+if(nrow(qc_all_pv)==0){
+  cat("No overlaps found between QC variants and data/regenie/pathogenic_vus.csv.")
+} else {
+  pv_summary<-qc_all_pv %>%
+    group_by(variant_set) %>%
+    summarise(total=n(),flagged=sum(flag==1),.groups='drop') %>%
+    arrange(variant_set)
+  kable(pv_summary)
+}
+```
+
+## Flagged Pathogenic/VUS By Gene
+
+```{r pv-gene-summary}
+if(nrow(qc_flagged_pv)==0){
+  cat("No flagged overlaps found in data/regenie/pathogenic_vus.csv.")
+} else {
+  pv_gene_summary<-qc_flagged_pv %>%
+    group_by(Gene,variant_set) %>%
+    summarise(flagged=n(),.groups='drop') %>%
+    arrange(desc(flagged),Gene,variant_set)
+  kable(pv_gene_summary)
+}
+```
+
+## CHEK2 From Pathogenic/VUS
+
+```{r chek2-from-pv}
+chek2_tbl<-qc_all_pv %>%
+  filter(Gene=="CHEK2") %>%
+  arrange(missing_fisher_p,carrier_fisher_p) %>%
+  select(
+    variant_id,variant_set,variant_type,
+    f2_missing_rate,f3_missing_rate,abs_missing_rate_diff,missing_fisher_p,
+    f2_carrier_rate_called,f3_carrier_rate_called,abs_carrier_rate_diff,carrier_fisher_p,
+    total_called_carriers,flag,flag_reasons
+  )
+if(nrow(chek2_tbl)==0){
+  cat("No CHEK2 variants from data/regenie/pathogenic_vus.csv were found in QC output.")
+} else {
+  kable(chek2_tbl)
+}
+```

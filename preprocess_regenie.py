@@ -15,8 +15,18 @@ def get_args():
     p.add_argument('--sites',help='Site mapping file (IID SITE) optional')
     p.add_argument('--controls',help='Controls list file (only needed if covariates has no STATUS)')
     p.add_argument('--covariates',help='Covariates file with FID IID STATUS; any other columns become extra covariates (e.g. FREEZE)')
+    p.add_argument('--negative-control-blacklist',default='',help='Optional file with variant IDs (one per line) to exclude from synonymous negative-control mask')
     p.add_argument('-O','--output-prefix',default='',help='Output directory prefix')
     return p.parse_args()
+
+
+def is_synonymous_consequence(value):
+    if pd.isna(value):
+        return False
+    text=str(value).strip().lower()
+    if not text:
+        return False
+    return 'synonymous_variant' in text
 
 
 def load_ancestry_table(path,dm_count,ancestry_columns):
@@ -40,8 +50,14 @@ def load_ancestry_table(path,dm_count,ancestry_columns):
             return None,0
         take=list(ancestry_columns)
     else:
-        # By design: keep *all* ancestry columns after IID (no truncation).
-        take=rest
+        # Default behavior: keep all ancestry columns, unless dm_count is set.
+        if dm_count is not None:
+            if dm_count <= 0:
+                print('Error: --dm-count must be > 0')
+                return None,0
+            take=rest[:dm_count]
+        else:
+            take=rest
     dm_n=len(take)
     rename={take[i]:f'DM{i+1}' for i in range(dm_n)}
     df=df.rename(columns=rename)
@@ -70,36 +86,80 @@ def main():
             print(f'  {f}')
         return
 
-    required_columns=['ID','Gene','Variant.LoF_level']
+    required_columns=['ID','Gene','Variant.LoF_level','Variant.Consequence']
     annotation_file=f'{prefix}regenie.annotation.txt'
     set_file=f'{prefix}regenie.set.txt'
 
-    with open(annotation_file,'w') as ann_f,open(set_file,'w') as set_f:
-        for vep_file in vep_files:
-            print(f'Processing VEP file: {vep_file}')
-            df=pd.read_csv(vep_file,usecols=required_columns)
-            pathogenic_df=df[df['Variant.LoF_level']==1][['ID','Gene']]
-            vus_df=df[df['Variant.LoF_level']==2][['ID','Gene']]
-            for _,row in pathogenic_df.iterrows():
-                ann_f.write(f"{row['ID']} {row['Gene']} pathogenic\n")
-            for _,row in vus_df.iterrows():
-                ann_f.write(f"{row['ID']} {row['Gene']} vus\n")
-            all_filtered_df=df[df['Variant.LoF_level'].isin([1,2])]
-            gene_groups=all_filtered_df.groupby('Gene')['ID'].agg(list)
-            for gene,variants in gene_groups.items():
-                first_variant=variants[0]
-                chr_pos=first_variant.split('_')[:2]
-                chr_name=chr_pos[0]
+    blacklist_ids=set()
+    if args.negative_control_blacklist and os.path.exists(args.negative_control_blacklist):
+        with open(args.negative_control_blacklist,'r') as f:
+            blacklist_ids={line.strip() for line in f if line.strip()}
+        print(f'Loaded {len(blacklist_ids)} blacklisted variant IDs for M4 negative control')
+    elif args.negative_control_blacklist:
+        print(f'Warning: negative-control blacklist not found: {args.negative_control_blacklist} (continuing without blacklist)')
+
+    variant_rows=[]
+    for vep_file in vep_files:
+        print(f'Processing VEP file: {vep_file}')
+        df=pd.read_csv(vep_file,usecols=required_columns)
+        variant_rows.append(df)
+
+    if variant_rows:
+        all_variants=pd.concat(variant_rows,ignore_index=True)
+    else:
+        all_variants=pd.DataFrame(columns=required_columns)
+
+    all_variants=all_variants.dropna(subset=['ID','Gene']).copy()
+    all_variants['ID']=all_variants['ID'].astype(str).str.strip()
+    all_variants['Gene']=all_variants['Gene'].astype(str).str.strip()
+    all_variants=all_variants[(all_variants['ID']!='') & (all_variants['Gene']!='')]
+    all_variants=all_variants.drop_duplicates(subset=['ID','Gene'])
+    all_variants['Variant.LoF_level']=pd.to_numeric(all_variants['Variant.LoF_level'],errors='coerce')
+
+    pathogenic_df=all_variants[all_variants['Variant.LoF_level']==1][['ID','Gene']].drop_duplicates()
+    vus_df=all_variants[all_variants['Variant.LoF_level']==2][['ID','Gene']].drop_duplicates()
+
+    syn_df=all_variants[all_variants['Variant.Consequence'].apply(is_synonymous_consequence)][['ID','Gene']].drop_duplicates()
+    if len(blacklist_ids)>0:
+        syn_df=syn_df[~syn_df['ID'].isin(blacklist_ids)]
+    excluded_ids=set(pathogenic_df['ID'].tolist()) | set(vus_df['ID'].tolist())
+    syn_df=syn_df[~syn_df['ID'].isin(excluded_ids)]
+    syn_df=syn_df.drop_duplicates()
+
+    with open(annotation_file,'w') as ann_f:
+        for _,row in pathogenic_df.iterrows():
+            ann_f.write(f"{row['ID']} {row['Gene']} pathogenic\n")
+        for _,row in vus_df.iterrows():
+            ann_f.write(f"{row['ID']} {row['Gene']} vus\n")
+        for _,row in syn_df.iterrows():
+            ann_f.write(f"{row['ID']} {row['Gene']} synonymous\n")
+
+    set_variants=pd.concat([pathogenic_df,vus_df,syn_df],ignore_index=True).drop_duplicates(subset=['ID','Gene'])
+    with open(set_file,'w') as set_f:
+        gene_groups=set_variants.groupby('Gene')['ID'].agg(list)
+        for gene,variants in gene_groups.items():
+            first_variant=variants[0]
+            chr_pos=first_variant.split('_')[:2]
+            if len(chr_pos)<2:
+                continue
+            chr_name=chr_pos[0]
+            try:
                 pos=int(chr_pos[1])
-                variant_str=','.join(variants)
-                set_f.write(f'{gene} {chr_name} {pos} {variant_str}\n')
+            except ValueError:
+                continue
+            variant_str=','.join(variants)
+            set_f.write(f'{gene} {chr_name} {pos} {variant_str}\n')
 
     print(f'Processed {len(vep_files)} VEP files')
+    print(f"M1 pathogenic variants: {len(pathogenic_df)}")
+    print(f"M2 VUS variants: {len(vus_df)}")
+    print(f"M4 synonymous negative-control variants: {len(syn_df)}")
 
     with open(f'{prefix}regenie.mask.txt','w') as f:
         f.write('M1 pathogenic\n')
         f.write('M2 vus\n')
         f.write('M3 pathogenic,vus\n')
+        f.write('M4 synonymous\n')
 
     samples_df=pd.read_csv(args.samples,header=None)
     if len(samples_df)>0 and samples_df.iloc[0,0] in ['IID','FID','#IID','#FID']:
