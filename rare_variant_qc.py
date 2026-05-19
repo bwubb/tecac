@@ -5,15 +5,23 @@ import os
 import sys
 import pandas as pd
 
+#Defaults for flags and should_flag().Edit here or pass CLI args.
+MISSING_ABS_DIFF_DEFAULT=0.03
+HIGH_MISSING_DEFAULT=0.05
+MISSING_FISHER_P_DEFAULT=1e-6
+CARRIER_FISHER_P_DEFAULT=1e-4
+CARRIER_ABS_DIFF_MIN_DEFAULT=0.01
+
 p=argparse.ArgumentParser(description="Controls-only freeze differential missingness and carrier QC per variant.")
 p.add_argument("--matrix",required=True,help="Variant x sample GT matrix from bcftools query")
 p.add_argument("--sample-order",required=True,help="Sample order file from bcftools query -l")
 p.add_argument("--sample-freeze",required=True,help="Sample to freeze map TSV (IID TAB FREEZE)")
 p.add_argument("--output",required=True,help="Output TSV path")
-p.add_argument("--min-abs-missing-diff",type=float,default=0.03,help="Flag threshold for absolute missingness-rate difference")
-p.add_argument("--high-missing-threshold",type=float,default=0.05,help="Flag threshold for high missingness in either freeze")
-p.add_argument("--carrier-fisher-p-threshold",type=float,default=1e-4,help="Flag threshold for carrier-rate Fisher p-value")
-p.add_argument("--missing-fisher-p-threshold",type=float,default=1e-6,help="Flag threshold for missingness Fisher p-value")
+p.add_argument("--exclude-ids",required=True,help="Flagged variant IDs, one per line (merged with PASS.id in Snakemake for bcftools)")
+p.add_argument("--min-abs-missing-diff",type=float,default=MISSING_ABS_DIFF_DEFAULT,help="Flag threshold for absolute missingness-rate difference")
+p.add_argument("--high-missing-threshold",type=float,default=HIGH_MISSING_DEFAULT,help="Flag threshold for high missingness in either freeze")
+p.add_argument("--carrier-fisher-p-threshold",type=float,default=CARRIER_FISHER_P_DEFAULT,help="Flag threshold for carrier-rate Fisher p-value")
+p.add_argument("--missing-fisher-p-threshold",type=float,default=MISSING_FISHER_P_DEFAULT,help="Flag threshold for missingness Fisher p-value")
 args=p.parse_args()
 FREEZE2="2"
 FREEZE3="3"
@@ -67,7 +75,7 @@ def should_flag(miss_f2,miss_f3,miss_p,carr_p,carr_abs,total_called_carriers):
     if miss_p is not None and miss_p<args.missing_fisher_p_threshold:
         reasons.append('missing_fisher')
     # Intentionally hardcoded for a mild first-pass screen.
-    if carr_p is not None and carr_abs is not None and carr_p<args.carrier_fisher_p_threshold and carr_abs>=0.01 and total_called_carriers>=3:
+    if carr_p is not None and carr_abs is not None and carr_p<args.carrier_fisher_p_threshold and carr_abs>=CARRIER_ABS_DIFF_MIN_DEFAULT and total_called_carriers>=3:
         reasons.append('carrier_fisher')
     return (1 if reasons else 0,','.join(reasons))
 
@@ -100,7 +108,8 @@ out_cols=[
 ]
 
 os.makedirs(os.path.dirname(args.output) or '.',exist_ok=True)
-with open(args.output,'w',newline='') as out:
+os.makedirs(os.path.dirname(args.exclude_ids) or '.',exist_ok=True)
+with open(args.output,'w',newline='') as out,open(args.exclude_ids,'w') as excl:
     w=csv.writer(out,delimiter='\t')
     w.writerow(out_cols)
     n_total=0
@@ -157,6 +166,7 @@ with open(args.output,'w',newline='') as out:
             reasons=set(flag_reasons.split(',')) if flag_reasons else set()
             if flag==1:
                 n_flag+=1
+                excl.write(vid+'\n')
             if 'missing_fisher' in reasons:
                 n_missing_fisher+=1
             if 'missing_abs_diff' in reasons:

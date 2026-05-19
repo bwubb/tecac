@@ -2,6 +2,17 @@ import csv
 import argparse
 import sys
 
+def load_sample_list(path):
+    """Load sample IDs from a simple one-ID-per-line file."""
+    keep=set()
+    with open(path) as f:
+        for line in f:
+            sample=line.strip()
+            if not sample or sample.startswith('#'):
+                continue
+            keep.add(sample)
+    return keep
+
 def _parse_id_pos(vid):
     """From ID chr22_15528747_G_A return (chr,pos) or None."""
     parts=vid.strip().split('_')
@@ -97,13 +108,17 @@ def load_sample_info(sample_info_path):
     return calls,chrom_seen
 
 def main():
-    ap=argparse.ArgumentParser(description='Test MNP pairs against cohort sample info: which samples have both variants and cis-like VAF.')
-    ap.add_argument('-p','--pairs',required=True,help='MNP pairs CSV from find_mnp_variants (consecutive rows = pair)')
-    ap.add_argument('-i','--input',required=True,help='Sample info file: space-separated ID SAMPLE GT AD DP VAF')
-    ap.add_argument('-o','--pass-out',dest='pass_out',required=True,help='Output: PASS samples (both variants, VAF close)')
-    ap.add_argument('-f','--fail-out',dest='fail_out',required=True,help='Output: FAIL samples (missing variant or VAF not close)')
-    ap.add_argument('--vaf-diff',type=float,default=0.10,help='Max |VAF1-VAF2| to call cis (default 0.10)')
-    args=ap.parse_args()
+    p=argparse.ArgumentParser(description='Test MNP pairs against cohort sample info: which samples have both variants and cis-like VAF.')
+    p.add_argument('-p','--pairs',required=True,help='MNP pairs CSV from find_mnp_variants (consecutive rows = pair)')
+    p.add_argument('-i','--input',required=True,help='Sample info file: space-separated ID SAMPLE GT AD DP VAF')
+    p.add_argument('-o','--pass-out',dest='pass_out',required=True,help='Output: PASS samples (both variants, VAF close)')
+    p.add_argument('-f','--fail-out',dest='fail_out',required=True,help='Output: FAIL samples (missing variant or VAF not close)')
+    p.add_argument('--vaf-diff',type=float,default=0.10,help='Max |VAF1-VAF2| to call cis (default 0.10)')
+    p.add_argument('--sample-list',default=None,help='Optional sample list file used to keep only pairs supported by listed samples')
+    p.add_argument('--min-samples',type=int,default=1,help='Minimum listed samples required per pair (default 1)')
+    args=p.parse_args()
+    if args.min_samples<1:
+        p.error('--min-samples must be >= 1')
 
     calls,chrom_seen=load_sample_info(args.input)
     if not calls:
@@ -115,12 +130,16 @@ def main():
         return
 
     pairs=load_pairs(args.pairs,chrom_filter=chrom_seen)
+    listed_samples=load_sample_list(args.sample_list) if args.sample_list else None
     pass_rows=[]
     fail_rows=[]
     pass_fields=['pair_id','id1','id2','sample','GT1','AD1','DP1','VAF1','GT2','AD2','DP2','VAF2','VAF_diff','Cis_likely']
     fail_fields=['pair_id','id1','id2','sample','reason','GT1','AD1','DP1','VAF1','GT2','AD2','DP2','VAF2','VAF_diff','Cis_likely']
+    dropped_pairs=0
 
     for pair_id,id1,id2,chr_,pos1,pos2 in pairs:
+        pair_pass_rows=[]
+        pair_fail_rows=[]
         samples_id1={s for (vid,s) in calls if vid==id1}
         samples_id2={s for (vid,s) in calls if vid==id2}
         both=samples_id1&samples_id2
@@ -147,14 +166,14 @@ def main():
                 'Cis_likely':cis,
             }
             if cis=='Yes':
-                pass_rows.append(row)
+                pair_pass_rows.append(row)
             else:
                 row['reason']='vaf_not_close'
-                fail_rows.append(row)
+                pair_fail_rows.append(row)
 
         for sample in only1:
             c1=calls[(id1,sample)]
-            fail_rows.append({
+            pair_fail_rows.append({
                 'pair_id':pair_id,'id1':id1,'id2':id2,'sample':sample,'reason':'missing_id2',
                 'GT1':c1.get('gt','.'),'AD1':c1.get('ad','.'),'DP1':c1.get('dp','.'),
                 'VAF1':f"{c1.get('vaf'):.4f}" if c1.get('vaf') is not None else '.',
@@ -163,13 +182,26 @@ def main():
 
         for sample in only2:
             c2=calls[(id2,sample)]
-            fail_rows.append({
+            pair_fail_rows.append({
                 'pair_id':pair_id,'id1':id1,'id2':id2,'sample':sample,'reason':'missing_id1',
                 'GT1':'.','AD1':'.','DP1':'.','VAF1':'.',
                 'GT2':c2.get('gt','.'),'AD2':c2.get('ad','.'),'DP2':c2.get('dp','.'),
                 'VAF2':f"{c2.get('vaf'):.4f}" if c2.get('vaf') is not None else '.',
                 'VAF_diff':'.','Cis_likely':'.',
             })
+
+        if listed_samples is not None:
+            listed_pass_count=sum(1 for row in pair_pass_rows if (row.get('sample') or '') in listed_samples)
+            if listed_pass_count<args.min_samples:
+                dropped_pairs+=1
+                for row in pair_pass_rows:
+                    row_out=row.copy()
+                    row_out['reason']='below_sample_list_threshold'
+                    pair_fail_rows.append(row_out)
+                pair_pass_rows=[]
+
+        pass_rows.extend(pair_pass_rows)
+        fail_rows.extend(pair_fail_rows)
 
     with open(args.pass_out,'w',newline='') as f:
         w=csv.DictWriter(f,fieldnames=pass_fields,delimiter='\t',extrasaction='ignore')
@@ -183,6 +215,10 @@ def main():
 
     print(f"PASS: {len(pass_rows)} -> {args.pass_out}",file=sys.stderr)
     print(f"FAIL: {len(fail_rows)} -> {args.fail_out}",file=sys.stderr)
+    if listed_samples is not None:
+        print(f"SAMPLE LIST: {len(listed_samples)} samples from {args.sample_list}",file=sys.stderr)
+        print(f"Pair threshold: >= {args.min_samples} listed sample(s)",file=sys.stderr)
+        print(f"Dropped pairs below sample-list threshold: {dropped_pairs}",file=sys.stderr)
 
 if __name__=='__main__':
     main()

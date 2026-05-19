@@ -1,7 +1,8 @@
+#needs exwas_qc_report2.Rmd
+
 #include: "select_variants3.smk"
-#include: "build_files.smk"
-#include: "annotation_files2.smk"
-#include: "missingness_bias.smk"
+include: "build_files.smk"
+include: "annotation_files3.smk"
 
 import os
 import datetime
@@ -18,23 +19,17 @@ CHROMOSOMES_ALL=list(range(1,23))+['X']
 # Individual chromosome files (REQUIRED)
 BCF_INPUT=config['input']['chromosomes']
 
-# QC thresholds
-GENO_THR=config.get('qc',{}).get('geno_thr',0.01)
-MAF_THR=config.get('qc',{}).get('maf_thr',0.05)
-HWE_THR=config.get('qc',{}).get('hwe_thr',1e-6)
-MIND_THR=config.get('qc',{}).get('mind_thr',0.05)#0.01
-DIFF_MISS_THR=config.get('qc',{}).get('diff_miss_thr',1e-5)
-
 wildcard_constraints:
     CHR='[0-9XY]+'
 
 rule qc_report:
     input:
         f"exwas_qc_report.{DATE}.html",
+        f"data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.{DATE}.html",
+#rename this rv-wc html and drop freeze2,3 shit from the file names.
 
 rule finalize:
     input:
-        "data/qc/reports/exwas_qc_report.html",
         expand("data/final/chr{CHR}.annotation.no_sample.vep.bcf",CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/final/chr{CHR}.annotation.no_sample.vep.report.csv",CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/final/chr{CHR}.annotation.pgen",CHR=CHROMOSOMES_AUTOSOMAL),
@@ -46,7 +41,6 @@ rule finalize:
 
 
 ###### FINAL OUTPUT #########
-# QC report does not list diff-miss files as Snakemake inputs; run missingness_bias.smk if you want those sections populated.
 
 # Generate QC report
 rule generate_qc_report:
@@ -61,26 +55,20 @@ rule generate_qc_report:
         postfilter_stats=expand("data/qc/reports/chr{CHR}.postfilter.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         plink_filter_metrics=expand("data/qc/reports/chr{CHR}.plink_filter_metrics.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         postplink_counts=expand("data/qc/reports/chr{CHR}.postplink.variant_count.txt",CHR=CHROMOSOMES_AUTOSOMAL),
-        variant_afreq=expand("data/plink/chr{CHR}.afreq",CHR=CHROMOSOMES_AUTOSOMAL),
-        variant_vmiss=expand("data/plink/chr{CHR}.vmiss",CHR=CHROMOSOMES_AUTOSOMAL),
-        variant_hardy=expand("data/plink/chr{CHR}.hardy",CHR=CHROMOSOMES_AUTOSOMAL),
+        variant_afreq=expand("data/plink/chr{CHR}.site-qc.var-qc.afreq",CHR=CHROMOSOMES_AUTOSOMAL),
+        variant_vmiss=expand("data/plink/chr{CHR}.site-qc.var-qc.vmiss",CHR=CHROMOSOMES_AUTOSOMAL),
+        variant_hardy=expand("data/plink/chr{CHR}.site-qc.var-qc.hardy",CHR=CHROMOSOMES_AUTOSOMAL),
         postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
-        # From MNP pipeline (e.g. mnp.smk). Comment out until a rule produces this file.
-        mnp_validation_metrics="data/mnp/mnp.validation.metrics.tsv"
+        # MNP validation metrics are optional in exwas_qc_report2.Rmd (loaded if file exists).
     output:
-        html="data/qc/reports/exwas_qc_report.html",
         dated=f"exwas_qc_report.{DATE}.html",
     params:
         project=PROJECT_NAME,
         data_dir="data",
         covariate_file=config.get('input',{}).get('covariates','')
-    resources:
-        lsf_err="logs/lsf/generate_qc_report.e",
-        lsf_out="logs/lsf/generate_qc_report.o"
     shell:
         """
-        Rscript -e "suppressWarnings(rmarkdown::render('exwas_qc_report2.Rmd', output_file='{output.html}', params=list(project='{params.project}', data_dir='{params.data_dir}', covariate_file='{params.covariate_file}')))"
-        cp {output.html} {output.dated}
+        Rscript -e "suppressWarnings(rmarkdown::render('exwas_qc_report2.Rmd',output_file='{output.dated}',params=list(project='{params.project}',data_dir='{params.data_dir}',covariate_file='{params.covariate_file}')))"
         """
 
 rule final_annotation:
@@ -98,9 +86,6 @@ rule final_annotation:
         pgen="data/final/chr{CHR}.annotation.pgen",
         pvar="data/final/chr{CHR}.annotation.pvar",
         psam="data/final/chr{CHR}.annotation.psam"
-    resources:
-        lsf_err="logs/lsf/final_annotation.chr{CHR}.e",
-        lsf_out="logs/lsf/final_annotation.chr{CHR}.o"
     shell:
         """
         bcftools view -Ob -o {output.bcf} {input.vcf}
@@ -124,9 +109,6 @@ rule final_build:
         snplist="data/final/build.snplist",
         eigenvec="data/final/build.eigenvec",
         eigenval="data/final/build.eigenval"
-    resources:
-        lsf_err="logs/lsf/final_build.e",
-        lsf_out="logs/lsf/final_build.o"
     shell:
         """
         rsync -av {input.pgen} {output.pgen}
@@ -149,9 +131,6 @@ rule final_lists:
     params:
         covariates=config.get('input',{}).get('covariates',''),
         controls_file=config.get('input',{}).get('controls','')
-    resources:
-        lsf_err="logs/lsf/final_lists.e",
-        lsf_out="logs/lsf/final_lists.o"
     run:
         with open(input.exclusions1,'r') as e1:
             exclusions = e1.read().splitlines()

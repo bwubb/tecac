@@ -1,0 +1,112 @@
+---
+title: "MNP Results Report"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+params:
+  csv_dir: "data/mnp"
+  plan_dir: "data/mnp"
+  summary_dir: "data/mnp"
+  chroms: "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22"
+---
+
+**Run the Python script first** to build summary files (chr-by-chr, fast):
+
+`python mnp_report_data.py -p data/mnp -c data/mnp -o data/mnp`
+
+Then render this Rmd. Summary files: `mnp_report_missing_variants.txt`, `mnp_report_pair_lof.txt`, `mnp_report_summary_stats.txt`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(knitr)
+
+# Columns we care about for display
+display_cols <- c("ID", "Gene", "Variant.LoF_level", "Variant.Category", "Variant.Class",
+  "Variant.Consequence", "HGVSc", "HGVSp", "AutoGVP",
+  "Sample.Zyg", "Sample.Depth", "Sample.AltDepth", "Sample.AltFrac")
+```
+
+## Load summary files (from Python script)
+
+Summary files are produced by `mnp_report_data.py` (chr-by-chr). Load them here.
+
+```{r load-summary}
+summary_dir <- params$summary_dir
+missing_path <- file.path(summary_dir, "mnp_report_missing_variants.txt")
+pair_path <- file.path(summary_dir, "mnp_report_pair_lof.txt")
+stats_path <- file.path(summary_dir, "mnp_report_summary_stats.txt")
+
+if (!file.exists(missing_path)) stop("Run: python mnp_report_data.py -p ", params$plan_dir, " -c ", params$csv_dir, " -o ", summary_dir)
+if (!file.exists(pair_path)) stop("Missing ", pair_path)
+if (!file.exists(stats_path)) stop("Missing ", stats_path)
+
+missing_summary <- read_tsv(missing_path, show_col_types = FALSE)
+pair_summary <- read_tsv(pair_path, show_col_types = FALSE)
+stats <- read_tsv(stats_path, show_col_types = FALSE, col_names = c("name", "value"))
+n_carrier_combos_total <- stats %>% filter(name == "n_carrier_combos_total") %>% pull(value) %>% as.integer()
+n_carrier_combos_with_missing <- stats %>% filter(name == "n_carrier_combos_with_missing") %>% pull(value) %>% as.integer()
+```
+
+### Missing-variant summary
+
+- Total (pair, carrier-sample) combinations expected: `r nrow(plan_carriers)`
+- Combinations with at least one missing variant: `r nrow(missing_summary)`
+
+```{r table-missing}
+if (nrow(missing_summary) > 0) {
+  kable(missing_summary, format = "html",
+        caption = "Pairs and samples where one or more expected variant IDs are missing from the VEP CSV")
+} else {
+  "No missing variants: every carrier sample has id1, id2, and mnp_id rows in the VEP CSV."
+}
+```
+
+## Per-pair LoF (from summary)
+
+LoF comparison is precomputed by the Python script (first occurrence per variant per chrom).
+
+### LoF summary
+
+- Total MNP pairs (with at least one VEP row): `r nrow(pair_summary)`
+- Pairs where MNP LoF = 1 but SNP(s) not: `r sum(pair_summary$mnp_pathogenic_snps_not == "True", na.rm = TRUE)`
+- Pairs where SNP(s) LoF = 1 but MNP not: `r sum(pair_summary$snps_pathogenic_mnp_not == "True", na.rm = TRUE)`
+
+### Pairs with LoF disagreement (MNP vs SNPs)
+
+```{r table-disagree}
+disagree <- pair_summary %>%
+  filter(mnp_pathogenic_snps_not == "True" | snps_pathogenic_mnp_not == "True") %>%
+  select(mnp_id, chrom, pos, id1, id2, id_mnp, lof_SNP1, lof_SNP2, lof_MNP,
+         mnp_pathogenic_snps_not, snps_pathogenic_mnp_not)
+if (nrow(disagree) > 0) {
+  kable(disagree, format = "html", caption = "Pairs with LoF disagreement")
+} else {
+  "No pairs with LoF disagreement in this set."
+}
+```
+
+## Key fields: variant table (first 100 rows from first available VEP CSV)
+
+```{r table-key-fields}
+vep_files <- list.files(params$csv_dir, pattern = "mnp_gt\\.vep\\.csv$", full.names = TRUE)
+if (length(vep_files) == 0) {
+  chroms <- as.character(strsplit(params$chroms, ",")[[1]])
+  vep_files <- file.path(params$csv_dir, paste0("chr", chroms, ".mnp_gt.vep.csv"))
+  vep_files <- vep_files[file.exists(vep_files)]
+}
+vep_sample <- if (length(vep_files) > 0) {
+  read_csv(vep_files[1], col_types = cols(.default = col_character()), show_col_types = FALSE) %>% head(100)
+} else { tibble() }
+show_cols <- intersect(display_cols, names(vep_sample))
+if (nrow(vep_sample) > 0 && length(show_cols) > 0) {
+  kable(vep_sample %>% select(any_of(show_cols)), format = "html", caption = "Key fields (first 100 rows)")
+} else {
+  "No VEP CSV found or no display columns present."
+}
+```
+

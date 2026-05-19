@@ -1,10 +1,26 @@
 ---
 title: "Rare Variant QC by Freeze (controls only)"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
 output:
   html_document:
     toc: true
     toc_float: true
 ---
+
+This report performs **freeze-bias QC for rare variants in controls only**.
+
+Why this is needed:
+- We want to separate technical freeze effects from true disease signal.
+- If callability differs by freeze (for example one freeze has more missing genotypes), a variant can look associated downstream for technical reasons.
+- Controls-only comparison avoids mixing real case enrichment into the batch check.
+
+What this report tests per variant:
+- **Differential missingness by freeze** (Freeze 2 vs Freeze 3, Fisher's exact test plus absolute rate differences).
+- **Differential carrier rate by freeze** among called controls (Fisher's exact test plus absolute carrier-rate differences).
+
+How to interpret flags:
+- Treat this as a screening layer, not automatic exclusion by p-value alone.
+- Prioritize variants with meaningful effect size differences (not just tiny p-values), especially indels and variants in key genes.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo=FALSE,warning=FALSE,message=FALSE)
@@ -15,11 +31,11 @@ library(knitr)
 ```
 
 ```{r files}
-base_dir<-"data/qc/rare_variant_qc"
-chr_files<-list.files(base_dir,pattern="^chr[0-9]+\\.rare_variant_qc\\.tsv$",full.names=TRUE)
-out_all<-file.path(base_dir,"rare_variant_qc.freeze2_vs_freeze3.all.tsv")
-out_flagged<-file.path(base_dir,"rare_variant_qc.freeze2_vs_freeze3.flagged.tsv")
-pathogenic_vus_file<-"data/regenie/pathogenic_vus.csv"
+base_dir<-"data/qc/rare_variant"
+chr_files<-list.files(base_dir,pattern="^chr[0-9]+\\.rv-qc\\.tsv$",full.names=TRUE)
+out_all<-file.path(base_dir,"rv-qc.freeze2_vs_freeze3.all.tsv")
+out_flagged<-file.path(base_dir,"rv-qc.freeze2_vs_freeze3.flagged.tsv")
+pathogenic_vus_file<-"data/preprocess/pathogenic_vus.csv"
 
 if(length(chr_files)==0){
   stop("No per-chromosome rare variant QC files found.")
@@ -45,20 +61,43 @@ qc_flagged_pv<-qc_flagged %>% inner_join(pv,by=c("variant_id"="ID"))
 ## Overview
 
 ```{r overview}
+flagged_gene_n<-qc_flagged_pv %>%
+  filter(!is.na(Gene),Gene!="") %>%
+  distinct(Gene) %>%
+  nrow()
+
 overview<-tibble(
   metric=c(
     "Total variants tested",
     "Flagged variants",
-    "Fraction flagged"
+    "Fraction flagged",
+    "Unique genes with flagged variants (from preprocess/pathogenic_vus.csv overlap)"
   ),
   value=c(
     nrow(qc_all),
     nrow(qc_flagged),
-    ifelse(nrow(qc_all)>0,sprintf("%.3f",nrow(qc_flagged)/nrow(qc_all)),"NA")
+    ifelse(nrow(qc_all)>0,sprintf("%.3f",nrow(qc_flagged)/nrow(qc_all)),"NA"),
+    flagged_gene_n
   )
 )
 kable(overview)
 ```
+
+## Current Exclusion Logic and Cutoffs
+
+The exclusion list (`rare_variant_exclusions.txt`) is built from variants with `flag==1` in the per-chromosome QC output.  
+Current rule logic (from `rare_variant_qc.py` + `rare_variant_qc.smk`):
+
+- Missingness absolute difference: `abs(f2_missing_rate-f3_missing_rate)>0.03`
+- High missingness in either freeze: `max(f2_missing_rate,f3_missing_rate)>0.05`
+- Missingness Fisher test: `missing_fisher_p<1e-6`
+- Carrier Fisher test: `carrier_fisher_p<1e-4` **and** `abs(f2_carrier_rate_called-f3_carrier_rate_called)>=0.01` **and** `total_called_carriers>=3`
+
+Where to go deeper before/after exclusions:
+- Review top flagged variants by effect size (`abs_missing_rate_diff`,`abs_carrier_rate_diff`), not p-value alone.
+- Prioritize indels and variants in high-impact genes (e.g., CHEK2 and top burden drivers).
+- Spot-check flagged variants with read-level/coverage context when available.
+- Compare whether key burden signals persist with and without flagged variants.
 
 ## Flag Reasons
 
@@ -190,7 +229,7 @@ if(nrow(qc_all)==0){
 
 ```{r pv-summary}
 if(nrow(qc_all_pv)==0){
-  cat("No overlaps found between QC variants and data/regenie/pathogenic_vus.csv.")
+  cat("No overlaps found between QC variants and data/preprocess/pathogenic_vus.csv.")
 } else {
   pv_summary<-qc_all_pv %>%
     group_by(variant_set) %>%
@@ -204,7 +243,7 @@ if(nrow(qc_all_pv)==0){
 
 ```{r pv-gene-summary}
 if(nrow(qc_flagged_pv)==0){
-  cat("No flagged overlaps found in data/regenie/pathogenic_vus.csv.")
+  cat("No flagged overlaps found in data/preprocess/pathogenic_vus.csv.")
 } else {
   pv_gene_summary<-qc_flagged_pv %>%
     group_by(Gene,variant_set) %>%
@@ -227,7 +266,7 @@ chek2_tbl<-qc_all_pv %>%
     total_called_carriers,flag,flag_reasons
   )
 if(nrow(chek2_tbl)==0){
-  cat("No CHEK2 variants from data/regenie/pathogenic_vus.csv were found in QC output.")
+  cat("No CHEK2 variants from data/preprocess/pathogenic_vus.csv were found in QC output.")
 } else {
   kable(chek2_tbl)
 }

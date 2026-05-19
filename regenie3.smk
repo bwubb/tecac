@@ -1,4 +1,7 @@
 
+#needs preprocess_regenie.py
+#needs report_regenie.Rmd
+
 from datetime import datetime
 import os
 
@@ -34,7 +37,8 @@ rule run_regenie:
         expand("data/final/{PROJECT}.regenie_report.html",PROJECT=PROJECT_NAME),
         expand("data/final/{PROJECT}.regenie.covar.txt",PROJECT=PROJECT_NAME),
         expand("data/final/{PROJECT}.regenie.pheno.txt",PROJECT=PROJECT_NAME),
-        expand("data/final/{PROJECT}.pathogenic_vus.csv",PROJECT=PROJECT_NAME)
+        expand("data/final/{PROJECT}.pathogenic_vus.csv",PROJECT=PROJECT_NAME),
+        expand("data/final/{PROJECT}.synonymous.csv",PROJECT=PROJECT_NAME)
 
 rule create_vep_list:
     input:
@@ -57,7 +61,8 @@ rule preprocess_regenie:
         set_file="data/regenie/regenie.set.txt",
         mask="data/regenie/regenie.mask.txt",
         covar="data/regenie/regenie.covar.txt",
-        pheno="data/regenie/regenie.pheno.txt"
+        pheno="data/regenie/regenie.pheno.txt",
+        synonymous="data/regenie/synonymous.csv"
     params:
         covariates=config['input'].get('covariates','covariates.txt'),
         ancestry=config['input'].get('ancestry_file','data/preprocess/build_pca_clean.eigenvec'),
@@ -70,6 +75,7 @@ rule preprocess_regenie:
         --vep-list-file {input.vep_list} \
         --samples {input.samples} \
         -O {params.output_prefix} \
+        --synonymous-out {output.synonymous} \
         --covariates {params.covariates} \
         --ancestry-file {params.ancestry} \
         --negative-control-blacklist {params.negative_control_blacklist} \
@@ -159,13 +165,15 @@ rule final_regenie_results:
         gene_based=expand("data/regenie/chr{CHR}.step2_gene_based_STATUS.regenie",CHR=CHROMOSOMES_AUTOSOMAL),
         covar="data/regenie/regenie.covar.txt",
         pheno="data/regenie/regenie.pheno.txt",
-        pathogenic="data/regenie/pathogenic_vus.csv"
+        pathogenic="data/regenie/pathogenic_vus.csv",
+        synonymous="data/regenie/synonymous.csv"
     output:
         single_variant=expand("data/final/{{PROJECT}}.chr{CHR}.step2_single_variant_STATUS.regenie",CHR=CHROMOSOMES_AUTOSOMAL),
         gene_based=expand("data/final/{{PROJECT}}.chr{CHR}.step2_gene_based_STATUS.regenie",CHR=CHROMOSOMES_AUTOSOMAL),
         covar="data/final/{PROJECT}.regenie.covar.txt",
         pheno="data/final/{PROJECT}.regenie.pheno.txt",
-        pathogenic="data/final/{PROJECT}.pathogenic_vus.csv"
+        pathogenic="data/final/{PROJECT}.pathogenic_vus.csv",
+        synonymous="data/final/{PROJECT}.synonymous.csv"
     shell:
         """
         for f in data/regenie/chr*.step2_single_variant_STATUS.regenie; do cp "${{f}}" "data/final/{wildcards.PROJECT}.$(basename "${{f}}")"; done
@@ -173,6 +181,7 @@ rule final_regenie_results:
         cp {input.covar} {output.covar}
         cp {input.pheno} {output.pheno}
         cp {input.pathogenic} {output.pathogenic}
+        cp {input.synonymous} {output.synonymous}
         """
 
 rule regenie_report:

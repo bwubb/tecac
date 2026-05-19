@@ -30,12 +30,12 @@ rule select_variants:
     input:
         "data/bcftools/chrX.input.bcf",
         "data/plink/chrX.sex_update.txt",
-        expand("data/qc/reports/chr{CHR}.prefilter.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
+        expand("data/qc/reports/chr{CHR}.prefilter.variant_types.select_variants.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/qc/reports/chr{CHR}.postfilter.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
-        expand("data/plink/chr{CHR}.pgen",CHR=CHROMOSOMES_AUTOSOMAL),
-        expand("data/plink/chr{CHR}.pvar",CHR=CHROMOSOMES_AUTOSOMAL),
-        expand("data/plink/chr{CHR}.psam",CHR=CHROMOSOMES_AUTOSOMAL),
-        expand("data/bcftools/chr{CHR}.qc_filter1.bcf",CHR=CHROMOSOMES_AUTOSOMAL)
+        expand("data/plink/chr{CHR}.site-qc.pgen",CHR=CHROMOSOMES_AUTOSOMAL),
+        expand("data/plink/chr{CHR}.site-qc.pvar",CHR=CHROMOSOMES_AUTOSOMAL),
+        expand("data/plink/chr{CHR}.site-qc.psam",CHR=CHROMOSOMES_AUTOSOMAL),
+        expand("data/bcftools/chr{CHR}.site-qc.bcf",CHR=CHROMOSOMES_AUTOSOMAL)
 
 rule bcftools_samples_region_tags:
     input:
@@ -72,6 +72,7 @@ rule bcf_to_plink_chrX:
         #add temp() for cleanup
     shell:
         """
+        mkdir -p data/plink
         bcftools query -l {input} | awk '{{OFS="\\t"}} {{print $1,$1,"0"}}' | cat <(echo -e "#FID\\tIID\\tSEX") - > {params.temp_psam}
         plink2 --bcf {input} --psam {params.temp_psam} --split-par hg38 --vcf-half-call haploid --make-pgen --out {params.outputname}
         """
@@ -154,7 +155,7 @@ rule count_variant_types_prefilter:
         bcf="data/bcftools/chr{CHR}.prefilter.bcf",
         csi="data/bcftools/chr{CHR}.prefilter.bcf.csi"
     output:
-        "data/qc/reports/chr{CHR}.prefilter.variant_types.txt"
+        "data/qc/reports/chr{CHR}.prefilter.variant_types.select_variants.txt"
     shell:
         """
         echo "TYPE COUNT" > {output}
@@ -172,8 +173,8 @@ rule bcftools_filter_per_chr:
     input:
         "data/bcftools/chr{CHR}.prefilter.bcf"
     output:
-        bcf="data/bcftools/chr{CHR}.qc_filter1.bcf",
-        csi="data/bcftools/chr{CHR}.qc_filter1.bcf.csi"
+        bcf="data/bcftools/chr{CHR}.site-qc.bcf",
+        csi="data/bcftools/chr{CHR}.site-qc.bcf.csi"
     shell:
         """
         bcftools filter -s NoHQHet -e 'COUNT(FORMAT/GT="0/1" && FORMAT/DP>=10 && FORMAT/GQ>=20 && FORMAT/VAF>0.2)=0' -m + {input} |
@@ -186,8 +187,8 @@ rule bcftools_stats_postfilter:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        bcf="data/bcftools/chr{CHR}.qc_filter1.bcf",
-        csi="data/bcftools/chr{CHR}.qc_filter1.bcf.csi"
+        bcf="data/bcftools/chr{CHR}.site-qc.bcf",
+        csi="data/bcftools/chr{CHR}.site-qc.bcf.csi"
     output:
         "data/qc/reports/chr{CHR}.postfilter.stats"
     shell:
@@ -198,8 +199,8 @@ rule count_variant_types_postfilter:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        bcf="data/bcftools/chr{CHR}.qc_filter1.bcf",
-        csi="data/bcftools/chr{CHR}.qc_filter1.bcf.csi"
+        bcf="data/bcftools/chr{CHR}.site-qc.bcf",
+        csi="data/bcftools/chr{CHR}.site-qc.bcf.csi"
     output:
         "data/qc/reports/chr{CHR}.postfilter.variant_types.txt"
     shell:
@@ -217,16 +218,16 @@ rule bcf_to_plink_per_chr:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        bcf="data/bcftools/chr{CHR}.qc_filter1.bcf",
-        csi="data/bcftools/chr{CHR}.qc_filter1.bcf.csi",
+        bcf="data/bcftools/chr{CHR}.site-qc.bcf",
+        csi="data/bcftools/chr{CHR}.site-qc.bcf.csi",
         sex_file="data/plink/chrX.sex_update.txt"
     output:
-        pgen="data/plink/chr{CHR}.pgen",
-        pvar="data/plink/chr{CHR}.pvar",
-        psam="data/plink/chr{CHR}.psam"
+        pgen="data/plink/chr{CHR}.site-qc.pgen",
+        pvar="data/plink/chr{CHR}.site-qc.pvar",
+        psam="data/plink/chr{CHR}.site-qc.psam"
     params:
-        tmp="data/plink/chr{CHR}.temp",
-        outputname="data/plink/chr{CHR}"
+        tmp="data/plink/chr{CHR}.site-qc.temp",
+        outputname="data/plink/chr{CHR}.site-qc"
     shell:
         """
         # psam with FID=IID and SEX=0 (all plink files use double ID; sex updated below from chrX)

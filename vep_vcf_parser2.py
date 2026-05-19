@@ -1,0 +1,887 @@
+import vcfpy
+import os
+import csv
+import argparse
+from collections import defaultdict
+import re
+
+GT_MAPPING={'0/0':'HOM_REF','0/1':'HET_ALT','1/0':'HET_ALT','1/1':'HOM_ALT'}
+ZYG_MAPPING={'0;0':'HOM_REF','0;1':'HET_ALT','1;0':'HET_ALT','1;1':'HOM_ALT'}
+GNOMAD_POPULATIONS=[('AF',''),('AFR','_AFR_AF'),('AMR','_AMR_AF'),('ASJ','_ASJ_AF'),('EAS','_EAS_AF'),('FIN','_FIN_AF'),('NFE','_NFE_AF'),('OTH','_OTH_AF'),('SAS','_SAS_AF')]
+SPLICEAI_METRICS=['AG','AL','DG','DL']
+PREDICTORS=[('SIFT','SIFT'),('PolyPhen','PolyPhen'),('REVEL','REVEL')]
+CALLER_TOOLS=['LANCET','MUTECT2','STRELKA2','VARDICT','VARSCAN2']
+
+class SampleAnnot:
+    @staticmethod
+    def AD_check(AD):
+        for i,v in enumerate(AD):
+            if v in [None,'None','.']:
+                AD[i]=0
+        return AD
+
+    @staticmethod
+    def ZYG_check(GT,AD):
+        if GT in ['.','./.','.|.']:
+            #No GT info, try to make call from AD
+            if not AD or sum(AD)==0:
+                return '.'
+            f=AD[1]/sum(AD)
+            if f>=0.85:
+                return 'HOM_ALT'
+            elif f<=0.15:
+                return 'HOM_REF'
+            else:
+                return 'HET_ALT'
+        elif '.' in GT:
+            #Partial GT info, use AD to refine
+            #May need to add a haploid output.
+            if not AD or sum(AD)==0:
+                return GT
+            f=AD[1]/sum(AD)
+            if f>=0.85:
+                return 'HOM_ALT'
+            elif f<=0.15:
+                return 'HOM_REF'
+            else:
+                return 'HET_ALT'
+        else:
+            #Full GT info
+            return GT_MAPPING.get(GT,GT)
+
+    @staticmethod
+    def __get_calls__(sample_data):
+        _calls=[]
+
+        def safe_process_call(c):
+            x=defaultdict(str)
+            x['Sample.ID']=c['sample']
+            x['Sample.Depth']=f"{c.get('DP',0)}"
+            try:
+                ad=SampleAnnot.AD_check(c.get('AD',[0,0]))
+                x['Sample.AltDepth']=f"{ad[1]}"
+                dp=c.get('DP',0)
+                x['Sample.AltFrac']=f"{ad[1]/dp:.3f}" if dp else '.'
+                x['Sample.Zyg']=f"{SampleAnnot.ZYG_check(c.get('genotype','./.'),ad)}"
+
+                return x if x['Sample.Zyg'] not in ['.','HOM_REF'] else None
+
+            except (IndexError,ZeroDivisionError,TypeError):
+                return None
+
+        _calls=[x for c in sample_data if (x:=safe_process_call(c))]
+        return _calls
+
+class TumorNormalAnnot:
+    @staticmethod
+    def __tumor_normal__(sample_data,tumor_id):
+        x=defaultdict(str)
+        for c in sample_data:
+            #Set prefix based on whether this is tumor or normal
+            prefix='Tumor.' if c['sample'].lower()=='tumor' or c['sample']==tumor_id else 'Normal.'
+
+            #Basic sample information
+            x[f'{prefix}ID']=c['sample']
+            x[f'{prefix}Depth']=f"{c.get('DP','.')}"
+            # gt_bases format is already / separated, convert to ; for zygosity
+            gt_bases=c.get('gt_bases','./.')
+            if isinstance(gt_bases,str):
+                x[f'{prefix}Zyg']=f"{gt_bases.replace('/',';')}"
+            else:
+                x[f'{prefix}Zyg']='./.'
+
+            #First try to use AD if available
+            if 'AD' in c and c.get('AD') not in [None,'.',['.'],[],['None']]:
+                ad=c.get('AD')
+                if isinstance(ad,list) and len(ad)>1:
+                    x[f'{prefix}AltDepth']=f"{ad[1]}"
+                else:
+                    x[f'{prefix}AltDepth']=f"{ad}"
+
+            #Then try SAOBS/SROBS from VLR
+            elif 'SAOBS' in c and 'SROBS' in c:
+                try:
+                    #Extract counts from SAOBS (alt allele) and SROBS (ref allele)
+                    saobs=c.get('SAOBS')
+                    srobs=c.get('SROBS')
+                    if isinstance(saobs,list) and saobs: saobs=saobs[0]
+                    if isinstance(srobs,list) and srobs: srobs=srobs[0]
+
+                    #Sum all numeric prefixes in SAOBS and SROBS
+                    alt_count=0
+                    ref_count=0
+                    for match in re.finditer(r'(\d+)[A-Za-z]',saobs):
+                        alt_count+=int(match.group(1))
+                    for match in re.finditer(r'(\d+)[A-Za-z]',srobs):
+                        ref_count+=int(match.group(1))
+
+                    x[f'{prefix}AltDepth']=f"{alt_count}"
+
+                    #Calculate AltFrac from SAOBS/SROBS counts
+                    total_depth=alt_count+ref_count
+                    if total_depth>0:
+                        x[f'{prefix}AltFrac']=f"{alt_count/total_depth:.3f}"
+                except (AttributeError,IndexError,ValueError,TypeError):
+                    x[f'{prefix}AltDepth']='.'
+            else:
+                x[f'{prefix}AltDepth']='.'
+
+            #Handle allele fraction if not already set from SAOBS/SROBS
+            if f'{prefix}AltFrac' not in x or x[f'{prefix}AltFrac']=='':
+                try:
+                    if type(c.get('AF',['.']))==list:
+                        af_value=c.get('AF',['.'])[0]
+                        x[f'{prefix}AltFrac']=f"{float(af_value):.3f}" if af_value!='.' else '.'
+                    else:
+                        af_value=c.get('AF','.')
+                        x[f'{prefix}AltFrac']=f"{float(af_value):.3f}" if af_value!='.' else '.'
+                except (ValueError,TypeError,IndexError):
+                    x[f'{prefix}AltFrac']='.'
+
+            #Calculate AltFrac from AltDepth/Depth if not already set
+            if (x[f'{prefix}AltFrac']=='.' or x[f'{prefix}AltFrac']=='0.000') and x[f'{prefix}AltDepth']!='.' and x[f'{prefix}Depth']!='.':
+                try:
+                    alt_depth=float(x[f'{prefix}AltDepth'])
+                    depth=float(x[f'{prefix}Depth'])
+                    if depth>0 and alt_depth>0:
+                        x[f'{prefix}AltFrac']=f"{alt_depth/depth:.3f}"
+                except (ValueError,TypeError):
+                    pass
+
+            #Calculate AltDepth from AF*DP if needed
+            if x[f'{prefix}AltDepth']=='.' and x[f'{prefix}AltFrac']!='.' and x[f'{prefix}Depth']!='.':
+                try:
+                    x[f'{prefix}AltDepth']=f"{int(float(x[f'{prefix}Depth'])*float(x[f'{prefix}AltFrac']))}"
+                except (ValueError,TypeError):
+                    pass
+
+            #Handle zygosity
+            #Seems weird and overly complicated...
+            if x[f'{prefix}Zyg']=='.;.':
+                try:
+                    if x[f'{prefix}AltFrac']!='.':
+                        alt_frac=float(x[f'{prefix}AltFrac'])
+                        if 0.0<alt_frac<1.0:
+                            x[f'{prefix}Zyg']='HET'
+                        elif alt_frac==1.0:
+                            x[f'{prefix}Zyg']='HOM_ALT'
+                        else:
+                            x[f'{prefix}Zyg']='HOM_REF'
+                    else:
+                        x[f'{prefix}Zyg']='.'
+                except (ValueError,TypeError):
+                    pass
+            else:
+                x[f'{prefix}Zyg']=ZYG_MAPPING.get(x[f'{prefix}Zyg'],x[f'{prefix}Zyg'])
+
+        return [x]
+
+class GnomadAnnot:
+    def gnomAD(self,CSQ):
+        for pop,suffix in GNOMAD_POPULATIONS:
+            field_name=f'gnomAD.{pop}'
+            g_value=CSQ.get(f'gnomADg{suffix}','.')
+            e_value=CSQ.get(f'gnomADe{suffix}','.')
+            self.fields[field_name]=g_value if g_value!='.' else e_value
+        self.fields['gnomAD.MAX_AF']=CSQ.get('MAX_AF','.')
+        self.fields['gnomAD.MAX_POPS']=CSQ.get('MAX_AF_POPS','.')
+
+class ClinvarAnnot:
+    def clinvar(self,CSQ):
+        fields=[
+            ('ClinVar','ClinVar'),
+            ('ClinVar.SIG','ClinVar_CLNSIG'),
+            ('ClinVar.REVSTAT','ClinVar_CLNREVSTAT'),
+            ('ClinVar.DN','ClinVar_CLNDN'),
+            ('AutoGVP','ClinVar_AutoGVP')
+        ]
+        for field,csq_key in fields:
+            self.fields[field]=CSQ.get(csq_key,'.')
+
+class AutoGVPAnnot:
+    def autogvp(self,CSQ):
+        fields=[('AutoGVP','ClinVar_AutoGVP')]
+        for field,csq_key in fields:
+            self.fields[field]=CSQ.get('AutoGVP','.')
+
+class SpliceAIAnnot:
+    def splice_ai(self,CSQ):
+        for m in SPLICEAI_METRICS:
+            self.fields[f'SpliceAI.DS_{m}']=CSQ[f'SpliceAI_pred_DS_{m}']
+
+class PredictionAnnot:
+    def snv_prediction(self,CSQ):
+        for field,csq_key in PREDICTORS:
+            self.fields[field]=CSQ[csq_key]
+
+class AlphaMissenseAnnot:
+    def alphamissense(self,CSQ):
+        fields=[
+            ('AM.class','am_class'),
+            ('AM.pathogenicity','am_pathogenicity')
+        ]
+        for field,csq_key in fields:
+            self.fields[field]=CSQ.get(csq_key,'.')
+
+class MaveDBAnnot:
+    def mavedb(self,CSQ):
+        fields=[
+            ('MaveDB.nt','MaveDB_nt'),
+            ('MaveDB.pro','MaveDB_pro'),
+            ('MaveDB.score','MaveDB_score'),
+            ('MaveDB.urn','MaveDB_urn')
+        ]
+        for field,csq_key in fields:
+            self.fields[field]=CSQ.get(csq_key,'.')
+
+class MANEAnnot:
+    def mane(self,CSQ):
+        self.fields['MANE.Select']=CSQ.get('MANE_SELECT','.')
+        self.fields['MANE.PlusClinical']=CSQ.get('MANE_PLUS_CLINICAL','.')
+
+class BasicInfoAnnot:
+    def info(self,CSQ):
+        fields=[
+            ('Gene','SYMBOL'),
+            ('Gene.Accession','Gene'),
+            ('Variant.Class','VARIANT_CLASS'),
+            ('Variant.Consequence','Consequence'),
+            ('HGVSc','HGVSc'),
+            ('HGVSp','HGVSp'),
+            ('Feature.Type','Feature_type'),
+            ('Feature.Accession','Feature'),
+            ('Bio.type','BIOTYPE'),
+            ('Existing.variation','Existing_variation'),
+            ('EXON','EXON'),
+            ('INTRON','INTRON'),
+            ('STRAND','STRAND'),
+            ('cDNA.position','cDNA_position'),
+            ('CDS.position','CDS_position'),
+            ('Protein.position','Protein_position'),
+            ('Amino.acids','Amino_acids'),
+            ('Codons','Codons')
+        ]
+        for field,csq_key in fields:
+            value=CSQ[csq_key]
+            if field in ['HGVSc','HGVSp']:
+                value=value.split(':')[-1]
+            elif field in ['EXON','INTRON']:
+                value=value.replace('/','|')
+            self.fields[field]=value
+        self.fields['Variant.LoF_level']='.'
+
+class LofLevelAnnot:
+    def lof_level(self):
+        def check_level_one():
+            def condition_zero(bt):
+                return 'protein_coding' in bt.lower()
+            def condition_one(autogvp):#AutoGVP
+                return ('pathogenic' in autogvp.lower())
+            def condition_two(vc,en):
+                if '|' not in en:
+                    return False
+                i,j=en.split('|')
+                return ('frameshift' in vc or 'stop_gained' in vc) and i!=j
+            def condition_three(af):
+                if af in ['.','']:
+                    return True
+                return float(af)<=0.01
+            def condition_four(vc,hgvs):
+                p=re.compile(r'^c\.\d+([-+][12])([ACGT>]+|del|ins|dup)?$')
+                if 'splice' in vc:
+                    return bool(p.fullmatch(hgvs))
+                return False
+
+            return (condition_zero(self.fields['Bio.type']) and
+                   (condition_one(self.fields['AutoGVP']) or
+                    (condition_two(self.fields['Variant.Consequence'],self.fields['EXON']) and
+                     condition_three(self.fields['gnomAD.MAX_AF'])) or
+                    (condition_four(self.fields['Variant.Consequence'],self.fields['HGVSc']) and
+                     condition_three(self.fields['gnomAD.MAX_AF']))))
+
+        def check_level_two():
+            def condition_zero(bt):
+                return 'protein_coding' in bt.lower()
+            def condition_one(autogvp):
+                #May need to include AM not benign.
+                return (autogvp.lower() in ['','.','uncertain_significance'])
+            def condition_two(vc):
+                return any(x in vc for x in ['protein_altering','missense','inframe','start_lost','frameshift','splice'])
+            #def condition_three(revel):
+            #    if revel in ['.','']:
+            #        return True
+            #    return float(revel)>0.5
+            def condition_three(am):
+                return am.lower() in ['','.','likely_pathogenic']
+            
+            def condition_four(vc,ai):
+                if 'splice' in vc:
+                    return any(float(i)>0.5 for i in ai if i not in ['','.'])
+                return True
+            def condition_five(vc,hgvsp):
+                if 'inframe' not in vc:
+                    return True
+                # Match Gln/Glu deletions/duplications
+                p=re.compile(r'p\.[GQ]l[nu][0-9]+(?:_[GQ]l[nu][0-9]+)?(?:del|dup)')
+                return not bool(p.match(hgvsp))
+
+            return (condition_zero(self.fields['Bio.type']) and
+                   condition_one(self.fields['AutoGVP']) and
+                   condition_two(self.fields['Variant.Consequence']) and
+                   #condition_three(self.fields['REVEL']) and
+                   condition_three(self.fields['AM.class']) and
+                   condition_four(self.fields['Variant.Consequence'],[self.fields['SpliceAI.DS_AG'],self.fields['SpliceAI.DS_AL'],self.fields['SpliceAI.DS_DG'],self.fields['SpliceAI.DS_DL']]) and
+                   condition_five(self.fields['Variant.Consequence'],self.fields['HGVSp']))
+
+        def check_level_four():
+            return ('benign' in self.fields['AutoGVP'].lower() or
+                   'benign' in self.fields['ClinVar.SIG'].lower() or
+                   'protein_coding' not in self.fields['Bio.type'].lower())
+
+        if check_level_four():
+            self.fields['Variant.LoF_level']='4'
+        elif check_level_one():
+            if any(x in self.fields['Variant.Consequence'] for x in ["stream","UTR","intron"]):
+                self.fields['Variant.LoF_level']='2'
+                #Special case for stream, UTR, intron that are "Pathogenic"
+            else:
+                self.fields['Variant.LoF_level']='1'
+        elif check_level_two():
+            self.fields['Variant.LoF_level']='2'
+        else:
+            self.fields['Variant.LoF_level']='3'
+        #Need to know onco genes vs tumor suppressors from OncoKB, but this is a bad thing to have to run.
+        #I can make a simple lookup table
+
+
+class VEPannotation(BasicInfoAnnot,MANEAnnot,GnomadAnnot,ClinvarAnnot,SpliceAIAnnot,
+                   PredictionAnnot,AlphaMissenseAnnot,MaveDBAnnot,
+                   SampleAnnot,TumorNormalAnnot,LofLevelAnnot):
+    """
+    Main class for parsing VEP-annotated VCF files.
+
+    Supports multiple modes:
+    - Cohort analysis
+    - Tumor/Normal paired analysis
+    - Single sample analysis
+    - No sample mode
+
+    Attributes:
+        fields (defaultdict): Stores variant annotations
+        calls (list): Sample genotype information
+        call_count (int): Number of calls processed
+    """
+    def __init__(self,record,vcf_reader,tumor_normal=False,tumor_id=None,no_sample=False,single_sample=None):
+        self.no_sample=no_sample
+        self.fields=defaultdict(str)
+        # vcfpy: use uppercase attributes
+        self.fields['Chr']=f"{record.CHROM}"
+        self.fields['Start']=f"{record.POS}"  # vcfpy POS is 1-based
+        self.fields['REF']=f"{record.REF}"
+        # vcfpy: ALT is list of AltRecord objects, get value from first
+        if record.ALT and len(record.ALT)>0:
+            alt_record=record.ALT[0]
+            # AltRecord can be Substitution (has .value) or other types
+            if hasattr(alt_record,'value'):
+                self.fields['ALT']=f"{alt_record.value}"
+            else:
+                self.fields['ALT']=f"{alt_record.serialize()}"
+        else:
+            self.fields['ALT']="."
+        #Handle FILTER - vcfpy FILTER is list of strings
+        if not record.FILTER or len(record.FILTER)==0:
+            self.fields['FILTER']='PASS'
+        else:
+            filter_str=';'.join(record.FILTER) if isinstance(record.FILTER,list) else str(record.FILTER)
+            self.fields['FILTER']=filter_str.replace("MONOALLELIC",'.')
+        # vcfpy: ID is list of strings
+        self.fields['ID']=f"{';'.join(record.ID)}" if record.ID and len(record.ID)>0 else "."
+        
+        if no_sample:
+            #Skip sample data extraction for no_sample mode
+            self.calls=[]
+            self.call_count=0
+        else:
+            #Extract sample data
+            sample_data=[]
+            # vcfpy: access samples via record.calls (list of Call objects) or record.call_for_sample
+            for call in record.calls:
+                sample_name=call.sample
+                # In single mode, only process the specified sample
+                if single_sample and sample_name!=single_sample:
+                    continue
+                
+                try:
+                    # vcfpy: GT is in call.data dict
+                    genotype=call.data.get('GT')
+                    if genotype is None:
+                        genotype='./.'
+                    else:
+                        # GT format is already like "0/1" or "0|1"
+                        genotype=str(genotype)
+                except Exception as e:
+                    print(f"Error parsing genotype for sample {sample_name} at {record.CHROM}:{record.POS}: {e}")
+                    print(f"  Raw record: {record}")
+                    genotype='./.'
+                
+                # vcfpy: DP accessed via call.data['DP']
+                dp=0
+                try:
+                    dp_val=call.data.get('DP')
+                    if dp_val is not None:
+                        dp=int(dp_val)
+                except (ValueError,TypeError):
+                    dp=0
+                
+                # Handle AD field - vcfpy AD is list [ref, alt1, alt2, ...]
+                alt_depth=0
+                ref_depth=0
+                try:
+                    ad=call.data.get('AD')
+                    if ad is not None:
+                        if isinstance(ad,(list,tuple)) and len(ad)>1:
+                            ref_depth=int(ad[0]) if ad[0] is not None else 0
+                            alt_depth=int(ad[1]) if ad[1] is not None else 0
+                        elif isinstance(ad,(list,tuple)) and len(ad)==1:
+                            ref_depth=int(ad[0]) if ad[0] is not None else 0
+                except (ValueError,TypeError,IndexError):
+                    pass
+                
+                # Fallback: calculate ref_depth from DP if AD not available
+                if ref_depth==0 and dp>0 and alt_depth==0:
+                    ref_depth=max(0,dp-alt_depth)
+                
+                sample_data.append({
+                    'sample':sample_name,
+                    'genotype':genotype,
+                    'gt_bases':genotype,  # For TumorNormalAnnot compatibility
+                    'DP':dp,
+                    'AD':[ref_depth,alt_depth]
+                })
+            
+            if tumor_normal:
+                self.calls=self.__tumor_normal__(sample_data,tumor_id)
+            else:
+                self.calls=self.__get_calls__(sample_data)
+        self.call_count=len(self.calls)
+
+    def in_region(self,intervals):
+        if any([start<=int(self.fields['Start'])<=end for start,end in intervals]):
+            return True
+        return False
+
+    def fill_values(self,header):
+        for h in header:
+            if self.fields[h]=='':
+                self.fields[h]='.'
+
+    def print(self,header=['Chr','Start','REF','ALT','FILTER']):
+        return ','.join([self.fields[h] for h in header])
+
+    def report(self,writer):
+        # no_sample: one variant row only (no GT / sample columns in header)
+        if self.no_sample:
+            writer.writerow({**self.fields})
+            return
+        # cohort / single / tumor_normal: one row per retained call only; empty calls => write nothing
+        for o in self.calls:
+            writer.writerow({**self.fields,**o})
+
+#END CLASS
+
+def report_header(tumor_normal=False,no_caller=False):
+    # Base headers
+    if tumor_normal:
+        header=['Tumor.ID','Normal.ID','Chr','Start','REF','ALT','FILTER','ID']
+    else:
+        header=['Sample.ID','Chr','Start','REF','ALT','FILTER','ID']
+
+    # Core annotation headers
+    header+=['Gene','Gene.Accession','Variant.LoF_level','Variant.Category','Variant.Class','Variant.Consequence',
+            'HGVSc','HGVSp','Feature.Type','Feature.Accession','Bio.type','Existing.variation',
+            'EXON','INTRON','STRAND','cDNA.position','CDS.position','Protein.position','Amino.acids','Codons',
+            'MANE.Select','MANE.PlusClinical']
+
+    # All additional annotations
+    header+=['SpliceAI.DS_AG','SpliceAI.DS_AL','SpliceAI.DS_DG','SpliceAI.DS_DL',  # SpliceAI
+            'REVEL',  # SNV prediction
+            'gnomAD.AF','gnomAD.AFR','gnomAD.AMR','gnomAD.ASJ','gnomAD.EAS','gnomAD.FIN','gnomAD.NFE','gnomAD.OTH','gnomAD.SAS','gnomAD.MAX_AF','gnomAD.MAX_POPS',  # gnomAD
+            'ClinVar','ClinVar.SIG','ClinVar.REVSTAT','ClinVar.DN',  # ClinVar
+            'AutoGVP',  # AutoGVP
+            'AM.class','AM.pathogenicity',  # AlphaMissense
+            'MaveDB.nt','MaveDB.pro','MaveDB.score','MaveDB.urn']  # MaveDB
+            #'LOFTEE.lof','LOFTEE.filter','LOFTEE.flags','LOFTEE.info',  # LOFTEE doesnt work!
+
+    # Genotype information
+    if tumor_normal:
+        header+=['Tumor.Zyg','Tumor.Depth','Tumor.AltDepth','Tumor.AltFrac',
+                'Normal.Zyg','Normal.Depth','Normal.AltDepth','Normal.AltFrac']
+    else:
+        header+=['Sample.Zyg','Sample.Depth','Sample.AltDepth','Sample.AltFrac']
+
+    # Tumor/Normal specific headers - only include if no_caller is False
+    if tumor_normal and not no_caller:
+        header+=CALLER_TOOLS
+
+    return header
+
+
+def gene_list_check(fp):
+    #receive error for NoneType
+    try:
+        if os.path.isfile(fp):
+            with open(fp,'r') as file:
+                gene_list=file.read().splitlines()
+                #print(gene_list)
+                return True,gene_list
+    except TypeError:
+        pass
+    return False,[]
+
+def gene_blacklist_check(fp):
+    #receive error for NoneType
+    try:
+        if os.path.isfile(fp):
+            with open(fp,'r') as file:
+                blacklist=set(file.read().splitlines())
+                return True,blacklist
+    except TypeError:
+        pass
+    return False,set()
+
+def bed_region_check(fp):
+    #receive error for NoneType
+    try:
+        if os.path.isfile(fp):
+            bed_regions=defaultdict(list)
+            with open(fp,'r') as file:
+                reader=csv.reader(file,delimiter='\t')
+                for row in reader:
+                    bed_regions[row[0]].append([int(row[1]),int(row[2])])
+                return True,bed_regions
+    except TypeError:
+        pass
+    return False,{}
+
+def phred_to_probability(phred_score):
+    #phred_score is a list
+    if phred_score==["NA"] or phred_score==[]:
+        return "NA"
+    elif phred_score[0]=='inf' or phred_score[0]==float('inf'):
+        return "0.0"
+    return f"{10**(-float(phred_score[0])/10):.5f}"
+
+def open_variant_file(filename):
+    """
+    Open VCF or VCF.gz file using vcfpy.
+    vcfpy.Reader.from_path() auto-detects and handles compressed files.
+    """
+    return vcfpy.Reader.from_path(filename)
+
+def get_args(argv):
+    p=argparse.ArgumentParser()
+    p.add_argument('-i','--input_vcf',help='Input: vcf file from ensembl-vep.')
+    p.add_argument('-o','--output_csv',help='Output: csv file trimmed for specific design.')
+    p.add_argument('-g','--gene_list',help='Optional list of genes to include only.')
+    p.add_argument('-b','--gene_blacklist',help='Optional list of genes to exclude from analysis.')
+    p.add_argument('-r','--bed_region',help='Bed file format to subset regions.')
+    p.add_argument('-N','--no-caller',action='store_true',help='Do not include caller information.')
+    p.add_argument('-R','--include-ref',action='store_true',help='Include RefCall in output.')
+    p.add_argument('-V','--include_vlr',action='store_true',help='Include transformed VLR probability values.')
+    p.add_argument('-m','--mode',default='cohort',help='Run mode determines how calls are reported. Single should be "single,{sample.id}. Tumor/Normal should be "tumor_normal,{tumor.id},{normal.id}" OR use "no_sample"')
+    return p.parse_args(argv)
+
+def process_annotation(vep_data,csq_dict,tumor_normal,single,tumor,normal,sample):
+    """Process a single annotation and set sample IDs"""
+    vep_data.info(csq_dict)
+    vep_data.snv_prediction(csq_dict)
+    vep_data.splice_ai(csq_dict)
+    vep_data.gnomAD(csq_dict)
+    vep_data.clinvar(csq_dict)
+    vep_data.alphamissense(csq_dict)
+    vep_data.mavedb(csq_dict)
+    vep_data.lof_level()
+    
+    # Set sample IDs based on mode
+    if tumor_normal and vep_data.calls:
+        vep_data.calls[0]['Tumor.ID']=tumor
+        vep_data.calls[0]['Normal.ID']=normal
+    elif single and vep_data.calls:
+        try:
+            vep_data.calls[0]['Sample.ID']=sample
+        except IndexError:
+            return False
+    return True
+
+def should_report_variant(vep_data,gene_filter,gene_list,region_filter,bed_regions,record,blacklist_filter,blacklist):
+    """Determine if variant should be reported based on filters"""
+    if blacklist_filter and vep_data.fields['Gene'] in blacklist:
+        return "blacklist"
+    if gene_filter and vep_data.fields['Gene'] in gene_list:
+        return True
+    elif region_filter and vep_data.in_region(bed_regions[record.CHROM]):
+        return True
+    elif not gene_filter and not region_filter:
+        return True
+    return False
+
+def main(argv=None):
+    args=get_args(argv)
+    gene_filter,gene_list=gene_list_check(args.gene_list)
+    blacklist_filter,blacklist=gene_blacklist_check(args.gene_blacklist)
+    region_filter,bed_regions=bed_region_check(args.bed_region)
+    tumor=None
+
+    # Mode handling
+    if args.mode.startswith('tumor_normal'):
+        try:
+            mode,tumor,normal=args.mode.split(',')
+            tumor_normal=True
+            single=False
+            cohort=False
+        except ValueError:
+            raise ValueError("Tumor/Normal mode requires format: tumor_normal,{tumor.id},{normal.id}")
+    elif args.mode.startswith('single'):
+        try:
+            mode,sample=args.mode.split(',')
+            single=True
+            tumor_normal=False
+            cohort=False
+            normal=None
+            print(sample)
+        except ValueError:
+            raise ValueError("Single mode requires format: single,{sample.id}")
+    elif args.mode=='no_sample':
+        single=False
+        tumor_normal=False
+        cohort=False
+        tumor=None
+        normal=None
+        sample=None
+    elif args.mode=='cohort':
+        cohort=True
+        single=False
+        tumor_normal=False
+        tumor=None
+        normal=None
+        sample=None
+    else:
+        raise ValueError(f"Unsupported mode: {args.mode}")
+
+    # Print all arguments
+    print("="*60)
+    print("VEP VCF Parser - Configuration")
+    print("="*60)
+    print(f"Input VCF: {args.input_vcf}")
+    print(f"Output CSV: {args.output_csv}")
+    print(f"Mode: {args.mode}")
+    print(f"Gene list: {args.gene_list if args.gene_list else 'None'}")
+    print(f"Gene blacklist: {args.gene_blacklist if args.gene_blacklist else 'None'}")
+    print(f"BED region: {args.bed_region if args.bed_region else 'None'}")
+    print(f"Include VLR: {args.include_vlr}")
+    print(f"Include ref calls: {args.include_ref}")
+    print(f"No caller info: {args.no_caller}")
+    print("="*60)
+
+    header=report_header(tumor_normal,args.no_caller)
+
+    if args.mode=='no_sample':
+        for x in ['Sample.ID','Sample.Zyg','Sample.Depth','Sample.AltDepth','Sample.AltFrac']:
+            header.remove(x)
+
+    #I did it like this simply to control the column order
+    if args.include_vlr:
+        for x in ['PROB_SOMATIC_TUMOR','PROB_GERMLINE','PROB_SOMATIC_NORMAL','PROB_FFPE_ARTIFACT','PROB_ARTIFACT','PROB_ABSENT']:
+            header.append(x)
+    
+    if args.include_ref:
+        ref_call=True
+    else:
+        ref_call=False
+
+    #test data
+    #VcfReader=vcfpy.Reader.from_path('data/vcf/FLCN/PMBB-Release-2020-2.0_genetic_exome_FLCN_NF.norm.vep.vcf.gz')
+    # vcfpy: open VCF/VCF.gz file (auto-detects and handles compressed files)
+    VcfReader=open_variant_file(args.input_vcf)
+    #VLR wants ANN tag instead of CSQ.
+    #Changed CSQ to ANN
+    #Parse ANN header to get field names
+    ann_header=None
+    try:
+        # vcfpy: access INFO field info via header.get_info_field_info()
+        ann_info=VcfReader.header.get_info_field_info('ANN')
+        if ann_info:
+            desc=ann_info.description
+            # Extract field list from description like "Consequence annotations from Ensembl VEP. Format: Allele|Consequence|..."
+            if desc and 'Format:' in desc:
+                ann_header=desc.split('Format:')[-1].strip().split('|')
+            elif desc:
+                # Fallback: try to extract from description
+                ann_header=desc.split(' ')[-1].rstrip('">').split('|')
+    except:
+        #Fallback: iterate through header lines
+        for line in VcfReader.header.get_lines('INFO'):
+            if hasattr(line,'id') and line.id=='ANN':
+                desc=line.description if hasattr(line,'description') else None
+                if desc and 'Format:' in desc:
+                    ann_header=desc.split('Format:')[-1].strip().split('|')
+                elif desc:
+                    ann_header=desc.split(' ')[-1].rstrip('">').split('|')
+                break
+    
+    if not ann_header:
+        raise ValueError("ANN header not found in VCF file")
+    
+    with open(args.output_csv,'w') as outfile:
+        writer=csv.DictWriter(outfile,fieldnames=header,delimiter=',',restval='.',extrasaction='ignore',quoting=csv.QUOTE_NONNUMERIC,dialect='excel')
+        writer.writeheader()
+        variant_count=0
+        processed_count=0
+        skipped_no_ann=0
+        skipped_refcall=0
+        skipped_no_canonical=0
+        skipped_no_symbol=0
+        skipped_filters=0
+        skipped_blacklist=0
+        skipped_malformed=0
+        while True:
+            try:
+                record=next(VcfReader)
+            except StopIteration:
+                # End of file
+                break
+            except vcfpy.exceptions.InvalidRecordException as e:
+                skipped_malformed+=1
+                variant_count+=1
+                # Continue to next record
+                continue
+            except Exception as e:
+                # Unexpected error - print and re-raise
+                print(f"Unexpected error at variant {variant_count}: {e}")
+                raise
+            
+            variant_count+=1
+            if variant_count % 10000 == 0:
+                print(f"Processed {variant_count} variants...")
+            if variant_count % 1000 == 0:
+                print(f"  Processing variant {variant_count} at {record.CHROM}:{record.POS}")
+            # vcfpy: ALT is list of AltRecord objects
+            if len(record.ALT)>1:
+                print(f"Warning! : record.ALT length is {len(record.ALT)}. Not currently supported")
+            single_sample_name=sample if single else None
+            vep_data=VEPannotation(record,VcfReader,tumor_normal,tumor,args.mode=='no_sample',single_sample_name)
+
+            # vcfpy: access INFO via record.INFO (OrderedDict)
+            if 'ANN' not in record.INFO or record.INFO.get('ANN') is None:
+                skipped_no_ann+=1
+                continue
+            # vcfpy: FILTER is list of strings
+            if 'RefCall' in record.FILTER and not ref_call:
+                skipped_refcall+=1
+                continue
+
+            if tumor_normal:
+                # vcfpy: INFO values can be lists or single values
+                category_info=record.INFO.get("CATEGORY",['NA'])
+                if not isinstance(category_info,list):
+                    category_info=[category_info]
+                categories=[y for x in CALLER_TOOLS for y in category_info if x in y]
+                # Check if caller has PASS
+                for x in CALLER_TOOLS:
+                    caller_value=record.INFO.get(x,['NA'])
+                    if not isinstance(caller_value,list):
+                        caller_value=[caller_value]
+                    # Only add to categories if PASS
+                    if caller_value==['PASS']:
+                        categories=[y for y in categories if x in y]
+                    vep_data.fields[x]=caller_value[0] if caller_value else 'NA'
+                vep_data.fields["Variant.Category"]=";".join(categories) if categories else 'NA'
+
+            if args.include_vlr:
+                #Get INFO field IDs - vcfpy: iterate through header.info_ids()
+                for info_id in VcfReader.header.info_ids():
+                    if info_id.startswith("PROB_"):
+                        info_value=record.INFO.get(info_id,['NA'])
+                        # vcfpy INFO values can be lists or single values
+                        if not isinstance(info_value,list):
+                            info_value=[info_value]
+                        vep_data.fields[info_id]=phred_to_probability(info_value)
+                        #Maybe this goes into class
+
+            #First pass - find any canonical+high impact
+            high_impact=False
+            canonical_found=False
+            #Saud had suggested we do high impact even if we don't have a canonical.
+            #It may have required another annotation, I dont recall.
+            # vcfpy: ANN is typically a string, but handle list case
+            ann_value=record.INFO['ANN']
+            if isinstance(ann_value,list):
+                ann_value=','.join(str(v) for v in ann_value)
+            else:
+                ann_value=str(ann_value)
+            for csq_i in ann_value.split(','):
+                csq_dict=dict(zip(ann_header,csq_i.split('|')))
+                if csq_dict['SYMBOL']!='' and csq_dict['CANONICAL']=='YES':
+                    canonical_found=True
+                    if csq_dict.get('IMPACT','MODIFIER')=='HIGH':
+                        #All this just seems like it should be in a function...
+                        high_impact=True
+                        if process_annotation(vep_data,csq_dict,tumor_normal,single,tumor,normal,sample):
+                            vep_data.fill_values(header)
+                            filter_result=should_report_variant(vep_data,gene_filter,gene_list,region_filter,bed_regions,record,blacklist_filter,blacklist)
+                            if filter_result==True:
+                                vep_data.report(writer)
+                                processed_count+=1
+                                if processed_count % 100 == 0:
+                                    print(f"    Written {processed_count} variants to output")
+                            elif filter_result=="blacklist":
+                                skipped_blacklist+=1
+                            else:
+                                skipped_filters+=1
+
+            if not high_impact:
+                #Process first canonical for each gene
+                # Use same ann_value from above
+                for csq_i in ann_value.split(','):
+                    csq_dict=dict(zip(ann_header,csq_i.split('|')))
+                    if csq_dict['SYMBOL']!='' and csq_dict['CANONICAL']=='YES':
+                        if process_annotation(vep_data,csq_dict,tumor_normal,single,tumor,normal,sample):
+                            vep_data.fill_values(header)
+                            filter_result=should_report_variant(vep_data,gene_filter,gene_list,region_filter,bed_regions,record,blacklist_filter,blacklist)
+                            if filter_result==True:
+                                vep_data.report(writer)
+                                processed_count+=1
+                                if processed_count % 100 == 0:
+                                    print(f"    Written {processed_count} variants to output")
+                            elif filter_result=="blacklist":
+                                skipped_blacklist+=1
+                            else:
+                                skipped_filters+=1
+                        break
+            # Track skipped variants
+            if not canonical_found:
+                skipped_no_canonical+=1
+            elif not any(csq_dict.get('SYMBOL','')!='' for csq_i in ann_value.split(',') for csq_dict in [dict(zip(ann_header,csq_i.split('|')))]):
+                skipped_no_symbol+=1
+
+    VcfReader.close()
+    print(f"Total variants processed: {variant_count}")
+    print(f"Variants written to output: {processed_count}")
+    print(f"Variants skipped - no ANN: {skipped_no_ann}")
+    print(f"Variants skipped - RefCall: {skipped_refcall}")
+    print(f"Variants skipped - no canonical: {skipped_no_canonical}")
+    print(f"Variants skipped - no symbol: {skipped_no_symbol}")
+    print(f"Variants skipped - blacklist: {skipped_blacklist}")
+    print(f"Variants skipped - filters: {skipped_filters}")
+    print(f"Variants skipped - malformed: {skipped_malformed}")
+    print(f"{outfile.name} written.")
+
+if __name__=='__main__':
+    main()
+
+#try:
+#        snakemake
+#    except NameError:
+#        main(parse_arguments())
+#    else:
+#        main(parse_snakemake())

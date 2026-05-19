@@ -1,4 +1,5 @@
 import argparse
+import csv
 import os
 
 import pandas as pd
@@ -17,6 +18,7 @@ def get_args():
     p.add_argument('--covariates',help='Covariates file with FID IID STATUS; any other columns become extra covariates (e.g. FREEZE)')
     p.add_argument('--negative-control-blacklist',default='',help='Optional file with variant IDs (one per line) to exclude from synonymous negative-control mask')
     p.add_argument('-O','--output-prefix',default='',help='Output directory prefix')
+    p.add_argument('--synonymous-out',default='',help='Write full M4 synonymous table to this path')
     return p.parse_args()
 
 
@@ -86,9 +88,10 @@ def main():
             print(f'  {f}')
         return
 
-    required_columns=['ID','Gene','Variant.LoF_level','Variant.Consequence']
+    required_columns=['ID','Gene','Variant.LoF_level','Variant.Consequence','HGVSc','HGVSp']
     annotation_file=f'{prefix}regenie.annotation.txt'
     set_file=f'{prefix}regenie.set.txt'
+    synonymous_file=(args.synonymous_out.strip() or annotation_file.replace('regenie.annotation.txt','synonymous.csv'))
 
     blacklist_ids=set()
     if args.negative_control_blacklist and os.path.exists(args.negative_control_blacklist):
@@ -119,12 +122,13 @@ def main():
     pathogenic_df=all_variants[all_variants['Variant.LoF_level']==1][['ID','Gene']].drop_duplicates()
     vus_df=all_variants[all_variants['Variant.LoF_level']==2][['ID','Gene']].drop_duplicates()
 
-    syn_df=all_variants[all_variants['Variant.Consequence'].apply(is_synonymous_consequence)][['ID','Gene']].drop_duplicates()
-    if len(blacklist_ids)>0:
-        syn_df=syn_df[~syn_df['ID'].isin(blacklist_ids)]
     excluded_ids=set(pathogenic_df['ID'].tolist()) | set(vus_df['ID'].tolist())
-    syn_df=syn_df[~syn_df['ID'].isin(excluded_ids)]
-    syn_df=syn_df.drop_duplicates()
+    syn_base=all_variants[all_variants['Variant.Consequence'].apply(is_synonymous_consequence)].copy()
+    if len(blacklist_ids)>0:
+        syn_base=syn_base[~syn_base['ID'].isin(blacklist_ids)]
+    syn_base=syn_base[~syn_base['ID'].isin(excluded_ids)]
+    syn_export=syn_base[['ID','Gene','Variant.LoF_level','HGVSc','HGVSp']].drop_duplicates(subset=['ID','Gene'])
+    syn_df=syn_export[['ID','Gene']].copy()
 
     with open(annotation_file,'w') as ann_f:
         for _,row in pathogenic_df.iterrows():
@@ -154,6 +158,12 @@ def main():
     print(f"M1 pathogenic variants: {len(pathogenic_df)}")
     print(f"M2 VUS variants: {len(vus_df)}")
     print(f"M4 synonymous negative-control variants: {len(syn_df)}")
+
+    syn_dir=os.path.dirname(synonymous_file)
+    if syn_dir:
+        os.makedirs(syn_dir,exist_ok=True)
+    syn_export.to_csv(synonymous_file,index=False,quoting=csv.QUOTE_NONNUMERIC)
+    print(f"wrote {synonymous_file} (M4 synonymous dump; same columns as pathogenic_vus.csv)")
 
     with open(f'{prefix}regenie.mask.txt','w') as f:
         f.write('M1 pathogenic\n')

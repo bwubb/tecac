@@ -28,7 +28,7 @@ def _bcf_for_gene(wildcards):
     if gene not in _GENE_CHR_MAP:
         raise ValueError(f"GENE {gene} not found in data/regenie/pathogenic_vus.csv")
     chrom=_GENE_CHR_MAP[gene]
-    return f"data/bcftools/chr{chrom}.qc_filter1.bcf"
+    return f"data/bcftools/chr{chrom}.site-qc.bcf"
 
 #We need to load some sort of file to run followup on.
 #Which will come from regenie/meta analysis.
@@ -58,7 +58,7 @@ rule awk_gene_variants:
         awk -F',' 'NR>1 {{for(i=1;i<=NF;i++) gsub(/^"|"$/,"",$i); if($2=="{wildcards.GENE}" && $3=="2") print $1}}' {input} > {output.vus}
         """
 
-#qc_filter1 is fine to use. It has the IDS and the passing samples are from post het_miss sample filtering.
+# site-qc.bcf: IDs + passing samples after het_miss sample filtering.
 rule query_variant_genotypes:
     input:
         bcf=_bcf_for_gene,

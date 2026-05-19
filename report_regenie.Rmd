@@ -11,6 +11,10 @@ output:
 date: "`r Sys.Date()`"
 params:
   project_name: "TECAC_WES"
+  # Stem between ".chrN." and ".regenie" for Step 2 outputs under data/final/.
+  # Gene-based freeze_qc_candidate runs: --out ...step2_gene_based_STATUS.freeze_qc_candidate → ...freeze_qc_candidate_STATUS.regenie on disk.
+  step2_single_variant_mid: "step2_single_variant_STATUS"
+  step2_gene_based_mid: "step2_gene_based_STATUS"
 ---
 
 ```{=html}
@@ -20,6 +24,7 @@ params:
 <li><strong>Burden-style interpretation</strong> (effect direction, OR, volcano, CHEK2, directional gene lists) uses <code>TEST == &quot;ADD&quot;</code> only.</li>
 <li>An <strong>all-tests</strong> export includes <code>ADD</code>, <code>ADD-SKAT</code>, <code>ADD-SKATO</code>, … for archive and downstream meta-analysis.</li>
 <li><strong>Gene-based FDR</strong> (<code>PVAL_ADJ</code>) is Benjamini–Hochberg across <em>all</em> gene-based rows (every TEST × gene × mask × threshold), not within each TEST.</li>
+<li><strong>SKAT / SKATO</strong> are summarized in <strong>Gene-based results</strong> (non-directional p-values; no BETA/OR interpretation).</li>
 </ul>
 </div>
 ```
@@ -78,7 +83,7 @@ if(is.null(params$project_name) || params$project_name == "") {
 single_variant_list <- list()
 
 for(i in 1:22) {
-  file_path <- paste0("data/final/", params$project_name, ".chr", i, ".step2_single_variant_STATUS.regenie")
+  file_path <- paste0("data/final/", params$project_name, ".chr", i, ".", params$step2_single_variant_mid, ".regenie")
   if(file.exists(file_path)) {
     single_variant_list[[i]] <- read_delim(file_path, delim = " ", col_names = TRUE, trim_ws = TRUE)
   }
@@ -121,7 +126,7 @@ if(file.exists(pathogenic_vus_file)) {
 gene_based_list <- list()
 
 for(i in 1:22) {
-  file_path <- paste0("data/final/", params$project_name, ".chr", i, ".step2_gene_based_STATUS.regenie")
+  file_path <- paste0("data/final/", params$project_name, ".chr", i, ".", params$step2_gene_based_mid, ".regenie")
   if(file.exists(file_path)) {
     # Skip comment lines (e.g. "# Regenie step 2") so header is CHROM GENPOS ... BETA ...; wrong skip misaligns BETA.
     gene_based_list[[i]] <- read_delim(file_path, delim = " ", col_names = TRUE, trim_ws = TRUE, comment = "#")
@@ -663,6 +668,64 @@ if(nrow(chek2_results) > 0) {
     column_spec(c(8, 10, 11), color = ifelse(!is.na(chek2_results$PVAL_ADJ) & chek2_results$PVAL_ADJ < 0.05, "red", "black"))
 } else {
   cat("_CHEK2 not found in ADD burden results._")
+}
+```
+
+### SKAT and SKATO (gene-based)
+
+SKAT and SKATO test whether rare variants in a gene are associated with disease without assuming a common effect direction. They are presented as supporting (non-directional) evidence alongside ADD burden results.
+
+### Top results (SKAT and SKATO only)
+
+```{r gene-based-skat-skato-top, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+.fmt_small_p <- function(x) {
+  x <- as.numeric(x)
+  ifelse(!is.finite(x), "",
+    ifelse(x < 1e-4, formatC(x, format = "e", digits = 2), format(round(x, 5), trim = TRUE))
+  )
+}
+
+skat_skato <- gene_based_all %>%
+  dplyr::filter(TEST %in% c("ADD-SKAT", "ADD-SKATO")) %>%
+  dplyr::arrange(PVAL_ADJ, PVAL) %>%
+  dplyr::slice_head(n = 30L) %>%
+  dplyr::select(
+    GENE, TEST, MASK, THRESH,
+    PVAL, PVAL_ADJ, LOG10P,
+    N_CASES, N_CONTROLS,
+    A1FREQ_CASES, A1FREQ_CONTROLS
+  )
+
+if (nrow(skat_skato) == 0L) {
+  cat("_No SKAT/SKATO rows found (`TEST` in `ADD-SKAT`, `ADD-SKATO`). Confirm gene-based Step 2 outputs include those tests._\n")
+} else {
+  skat_view <- skat_skato %>%
+    dplyr::mutate(
+      PVAL = .fmt_small_p(PVAL),
+      PVAL_ADJ = .fmt_small_p(PVAL_ADJ)
+    )
+
+  knitr::kable(
+    skat_view,
+    format = "html",
+    digits = 4,
+    col.names = c(
+      "Gene", "Test", "Mask", "MAF filter",
+      "P-value", "FDR P-value", "−log10(P)",
+      "N cases", "N controls",
+      "A1 freq (cases)", "A1 freq (controls)"
+    ),
+    caption = "Top SKAT/SKATO signals ranked by FDR (PVAL_ADJ). No directionality is implied."
+  ) %>%
+    kableExtra::kable_styling(
+      full_width = TRUE,
+      bootstrap_options = c("striped", "hover", "condensed"),
+      font_size = 11
+    ) %>%
+    kableExtra::column_spec(1, bold = TRUE) %>%
+    kableExtra::column_spec(c(5, 6, 7), extra_css = "white-space: nowrap;") %>%
+    kableExtra::scroll_box(width = "100%", height = "480px") %>%
+    print()
 }
 ```
 

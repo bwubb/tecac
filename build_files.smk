@@ -2,21 +2,23 @@
 # BUILD FILES: pipeline to produce final analysis dataset (build) and PCA
 # =============================================================================
 # Pipeline order:
-#   1. Variant QC: geno, maf, hwe, SNPs only per chr → chr*.qc_filter2 (no LD on chr)
-#   2. Sample missingness on qc_filter2 per chr → .smiss
+#   1. Variant QC: geno, maf, hwe, SNPs only per chr → chr*.site-qc.var-qc.* (no LD on chr)
+#   2. Sample missingness on site-qc.var-qc per chr → .smiss
 #   3. Aggregate missingness + apply mind → high_missingness.txt (exclude list)
 #   4. Mind-passing keep list → mind_passing_keep.txt (samples to keep)
-#   5. Merge chr*.qc_filter2, keep only mind-passing samples → merge_mind (not build)
+#   5. Merge chr*.site-qc.var-qc, keep only mind-passing samples → merge_mind (not build)
 #   6. LD prune merge_mind (chr8 + long-LD excluded) → merge_mind.prune.in/.out (SNP list only)
 #   7. Heterozygosity on merge_mind.pruned (pruned SNP set) → merge_mind_pruned.het
 #   8. Identify het outliers from merge_mind_pruned.het → het_exclusions.txt
 #   9. Build = merge_mind minus het outliers → data/preprocess/build.* (final dataset for REGENIE; full variant set, chr8 retained)
 #  10. PCA on build using merge_mind.prune.in, chr 1-7,9-22, long-LD excluded (defensive) → build_pca.eigenvec/.eigenval
 # =============================================================================
+#needs aggregate_missingness.py
+#needs het_outliers.py
+#needs identify_pca_outliers.R
 # Include from main Snakefile: include: "build_files.smk"
 # Expects: config, CHROMOSOMES_AUTOSOMAL, GENO_THR, MAF_THR, HWE_THR, MIND_THR.
-# Main workflow provides: data/plink/chr{CHR}.pgen, data/plink/chrX.sex_update.txt.
-# Aux scripts: aggregate_missingness.py, het_outliers.py, identify_pca_outliers.R
+# Main workflow provides: data/plink/chr{CHR}.site-qc.pgen, data/plink/chrX.sex_update.txt.
 # =============================================================================
 
 CHROMOSOMES_AUTOSOMAL=list(range(1,23))
@@ -49,27 +51,27 @@ rule build_files:
         postfilter_stats=expand("data/qc/reports/chr{CHR}.postfilter.variant_types.txt", CHR=CHROMOSOMES_AUTOSOMAL),
         postplink_counts=expand("data/qc/reports/chr{CHR}.postplink.variant_count.txt", CHR=CHROMOSOMES_AUTOSOMAL),
         plink_filter_metrics=expand("data/qc/reports/chr{CHR}.plink_filter_metrics.txt", CHR=CHROMOSOMES_AUTOSOMAL),
-        variant_afreq=expand("data/plink/chr{CHR}.afreq", CHR=CHROMOSOMES_AUTOSOMAL),
-        variant_vmiss=expand("data/plink/chr{CHR}.vmiss", CHR=CHROMOSOMES_AUTOSOMAL),
-        variant_hardy=expand("data/plink/chr{CHR}.hardy", CHR=CHROMOSOMES_AUTOSOMAL),
+        variant_afreq=expand("data/plink/chr{CHR}.site-qc.var-qc.afreq", CHR=CHROMOSOMES_AUTOSOMAL),
+        variant_vmiss=expand("data/plink/chr{CHR}.site-qc.var-qc.vmiss", CHR=CHROMOSOMES_AUTOSOMAL),
+        variant_hardy=expand("data/plink/chr{CHR}.site-qc.var-qc.hardy", CHR=CHROMOSOMES_AUTOSOMAL),
 
 # -----------------------------------------------------------------------------
 # 1. Variant QC: geno, maf, hwe, SNPs only per chr. No LD pruning on chr files.
-#    Output: chr{CHR}.qc_filter2.pgen/pvar/psam
+#    Output: chr{CHR}.site-qc.var-qc.pgen/pvar/psam
 # -----------------------------------------------------------------------------
 rule plink2_filter_variants:
     input:
-        pgen="data/plink/chr{CHR}.pgen",
-        pvar="data/plink/chr{CHR}.pvar",
-        psam="data/plink/chr{CHR}.psam"
+        pgen="data/plink/chr{CHR}.site-qc.pgen",
+        pvar="data/plink/chr{CHR}.site-qc.pvar",
+        psam="data/plink/chr{CHR}.site-qc.psam"
     output:
-        pgen="data/plink/chr{CHR}.qc_filter2.pgen",
-        pvar="data/plink/chr{CHR}.qc_filter2.pvar",
-        psam="data/plink/chr{CHR}.qc_filter2.psam",
-        log="data/plink/chr{CHR}.qc_filter2.log"
+        pgen="data/plink/chr{CHR}.site-qc.var-qc.pgen",
+        pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar",
+        psam="data/plink/chr{CHR}.site-qc.var-qc.psam",
+        log="data/plink/chr{CHR}.site-qc.var-qc.log"
     params:
-        inputname="data/plink/chr{CHR}",
-        outputname="data/plink/chr{CHR}.qc_filter2",
+        inputname="data/plink/chr{CHR}.site-qc",
+        outputname="data/plink/chr{CHR}.site-qc.var-qc",
         geno=GENO_THR,
         maf=MAF_THR,
         hwe=HWE_THR
@@ -95,7 +97,7 @@ rule count_variant_types_prefilter_build:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        pvar="data/plink/chr{CHR}.pvar"
+        pvar="data/plink/chr{CHR}.site-qc.pvar"
     output:
         "data/qc/reports/chr{CHR}.prefilter.variant_types.txt"
     resources:
@@ -111,7 +113,7 @@ rule count_variant_types_postfilter_build:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        pvar="data/plink/chr{CHR}.qc_filter2.pvar"
+        pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar"
     output:
         "data/qc/reports/chr{CHR}.postfilter.variant_types.txt"
     resources:
@@ -127,7 +129,7 @@ rule count_variants_postplink_build:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        pvar="data/plink/chr{CHR}.qc_filter2.pvar"
+        pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar"
     output:
         "data/qc/reports/chr{CHR}.postplink.variant_count.txt"
     resources:
@@ -144,7 +146,7 @@ rule parse_plink_filter_metrics_build:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        log="data/plink/chr{CHR}.qc_filter2.log"
+        log="data/plink/chr{CHR}.site-qc.var-qc.log"
     output:
         "data/qc/reports/chr{CHR}.plink_filter_metrics.txt"
     resources:
@@ -166,47 +168,43 @@ rule plink2_freq_missing_hardy_build:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        pgen="data/plink/chr{CHR}.qc_filter2.pgen",
-        pvar="data/plink/chr{CHR}.qc_filter2.pvar",
-        psam="data/plink/chr{CHR}.qc_filter2.psam"
+        pgen="data/plink/chr{CHR}.site-qc.var-qc.pgen",
+        pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar",
+        psam="data/plink/chr{CHR}.site-qc.var-qc.psam"
     output:
-        afreq="data/plink/chr{CHR}.afreq",
-        vmiss="data/plink/chr{CHR}.vmiss",
-        hardy="data/plink/chr{CHR}.hardy"
+        afreq="data/plink/chr{CHR}.site-qc.var-qc.afreq",
+        vmiss="data/plink/chr{CHR}.site-qc.var-qc.vmiss",
+        hardy="data/plink/chr{CHR}.site-qc.var-qc.hardy"
     params:
-        inputname="data/plink/chr{CHR}.qc_filter2",
-        outputname="data/plink/chr{CHR}.qc_filter2_report"
+        inputname="data/plink/chr{CHR}.site-qc.var-qc",
+        outputname="data/plink/chr{CHR}.site-qc.var-qc"
     resources:
         lsf_err="logs/lsf/plink2_freq_missing_hardy_build.chr{CHR}.e",
         lsf_out="logs/lsf/plink2_freq_missing_hardy_build.chr{CHR}.o"
     shell:
         """
         plink2 --pfile {params.inputname} --freq --missing --hardy midp --out {params.outputname}
-        mv {params.outputname}.afreq {output.afreq}
-        mv {params.outputname}.vmiss {output.vmiss}
-        mv {params.outputname}.hardy {output.hardy}
         """
 
 # -----------------------------------------------------------------------------
-# 2. Sample missingness on qc_filter2 per chr → chr{CHR}.qc_filter2.smiss
+# 2. Sample missingness on site-qc.var-qc per chr → chr{CHR}.site-qc.var-qc.smiss
 # -----------------------------------------------------------------------------
 rule plink2_sample_missing_postfilter:
     input:
-        pgen="data/plink/chr{CHR}.qc_filter2.pgen",
-        pvar="data/plink/chr{CHR}.qc_filter2.pvar",
-        psam="data/plink/chr{CHR}.qc_filter2.psam"
+        pgen="data/plink/chr{CHR}.site-qc.var-qc.pgen",
+        pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar",
+        psam="data/plink/chr{CHR}.site-qc.var-qc.psam"
     output:
-        smiss="data/plink/chr{CHR}.qc_filter2.smiss"
+        smiss="data/plink/chr{CHR}.site-qc.var-qc.smiss"
     params:
-        inputname="data/plink/chr{CHR}.qc_filter2",
-        outputname="data/plink/chr{CHR}.qc_filter2_missing"
+        inputname="data/plink/chr{CHR}.site-qc.var-qc",
+        outputname="data/plink/chr{CHR}.site-qc.var-qc"
     resources:
         lsf_err="logs/lsf/plink2_sample_missing_postfilter.chr{CHR}.e",
         lsf_out="logs/lsf/plink2_sample_missing_postfilter.chr{CHR}.o"
     shell:
         """
         plink2 --pfile {params.inputname} --missing --out {params.outputname}
-        mv {params.outputname}.smiss {output.smiss}
         """
 
 # -----------------------------------------------------------------------------
@@ -215,7 +213,7 @@ rule plink2_sample_missing_postfilter:
 # -----------------------------------------------------------------------------
 rule aggregate_sample_missingness:
     input:
-        expand("data/plink/chr{CHR}.qc_filter2.smiss", CHR=CHROMOSOMES_AUTOSOMAL)
+        expand("data/plink/chr{CHR}.site-qc.var-qc.smiss", CHR=CHROMOSOMES_AUTOSOMAL)
     output:
         aggregated="data/plink/aggregated_missingness.txt",
         exclusions="data/qc/exclusions/high_missingness.txt",
@@ -236,7 +234,7 @@ rule aggregate_sample_missingness:
 # -----------------------------------------------------------------------------
 rule mind_passing_keep_samples:
     input:
-        psam="data/plink/chr1.qc_filter2.psam",
+        psam="data/plink/chr1.site-qc.var-qc.psam",
         exclusions="data/qc/exclusions/high_missingness.txt"
     output:
         "data/plink/mind_passing_keep.txt"
@@ -250,14 +248,14 @@ rule mind_passing_keep_samples:
         """
 
 # -----------------------------------------------------------------------------
-# 5. Merge chr*.qc_filter2 and keep only mind-passing samples.
+# 5. Merge chr*.site-qc.var-qc and keep only mind-passing samples.
 #    Output: merge_mind.pgen/pvar/psam (this is NOT build; name deliberately not "build")
 # -----------------------------------------------------------------------------
 rule plink2_merge_mind:
     input:
-        expand("data/plink/chr{CHR}.qc_filter2.pgen", CHR=CHROMOSOMES_AUTOSOMAL),
-        expand("data/plink/chr{CHR}.qc_filter2.pvar", CHR=CHROMOSOMES_AUTOSOMAL),
-        expand("data/plink/chr{CHR}.qc_filter2.psam", CHR=CHROMOSOMES_AUTOSOMAL),
+        expand("data/plink/chr{CHR}.site-qc.var-qc.pgen", CHR=CHROMOSOMES_AUTOSOMAL),
+        expand("data/plink/chr{CHR}.site-qc.var-qc.pvar", CHR=CHROMOSOMES_AUTOSOMAL),
+        expand("data/plink/chr{CHR}.site-qc.var-qc.psam", CHR=CHROMOSOMES_AUTOSOMAL),
         sex_file="data/plink/chrX.sex_update.txt",
         keep="data/plink/mind_passing_keep.txt"
     output:
@@ -275,8 +273,8 @@ rule plink2_merge_mind:
     shell:
         """
         rm -f file_list.txt
-        for chrom in {{2..22}}; do echo "data/plink/chr${{chrom}}.qc_filter2.pgen data/plink/chr${{chrom}}.qc_filter2.pvar data/plink/chr${{chrom}}.qc_filter2.psam" >> file_list.txt; done
-        plink2 --pfile data/plink/chr1.qc_filter2 --pmerge-list file_list.txt --make-pgen --double-id --write-snplist --out {params.merge_prefix}
+        for chrom in {{2..22}}; do echo "data/plink/chr${{chrom}}.site-qc.var-qc.pgen data/plink/chr${{chrom}}.site-qc.var-qc.pvar data/plink/chr${{chrom}}.site-qc.var-qc.psam" >> file_list.txt; done
+        plink2 --pfile data/plink/chr1.site-qc.var-qc --pmerge-list file_list.txt --make-pgen --double-id --write-snplist --out {params.merge_prefix}
         plink2 --pfile {params.merge_prefix} --update-sex {input.sex_file} --make-pgen --out {params.merge_prefix}
         plink2 --pfile {params.merge_prefix} --keep {input.keep} --make-pgen --write-snplist --out {params.output_prefix}
         awk 'NR>1 {{print $2}}' {output.psam} > {output.samples}

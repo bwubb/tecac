@@ -18,11 +18,11 @@
 # Expects when included:
 #   - config['qc']['diff_miss_thr'] (default 1e-5)
 #   - CHROMOSOMES_AUTOSOMAL
-#   - Inputs: data/plink/chr{CHR}.qc_filter2.pgen/.pvar/.psam (from build_files),
+#   - Inputs: data/plink/chr{CHR}.site-qc.var-qc.pgen/.pvar/.psam (from build_files),
 #             config input covariates file (FID IID FREEZE STATUS; STATUS 1/2)
 #   - Internal intermediates: chr*.bed_diffmiss_temp.*, chr*.bed_freeze_temp.*,
 #             chr*.pheno.txt, chr*.pheno_freeze.txt, chr*.freeze_sample_list.txt
-#   - Plot prep pvar source: data/plink/chr{CHR}.qc_filter2.pvar
+#   - Plot prep pvar source: data/plink/chr{CHR}.site-qc.var-qc.pvar
 # =============================================================================
 
 CHROMOSOMES_AUTOSOMAL=list(range(1,23))
@@ -46,14 +46,14 @@ rule plink_test_missing:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        pgen="data/plink/chr{CHR}.qc_filter2.pgen",
-        pvar="data/plink/chr{CHR}.qc_filter2.pvar",
-        psam="data/plink/chr{CHR}.qc_filter2.psam",
+        pgen="data/plink/chr{CHR}.site-qc.var-qc.pgen",
+        pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar",
+        psam="data/plink/chr{CHR}.site-qc.var-qc.psam",
         covariates=COVARIATES_FILE
     output:
         "data/plink/chr{CHR}.test.missing"
     params:
-        pfile_prefix="data/plink/chr{CHR}.qc_filter2",
+        pfile_prefix="data/plink/chr{CHR}.site-qc.var-qc",
         bed_prefix="data/plink/chr{CHR}.bed_diffmiss_temp",
         pheno_file="data/plink/chr{CHR}.pheno.txt",
         outputname="data/plink/chr{CHR}.test"
@@ -75,14 +75,14 @@ rule plink_test_missing_freeze:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        pgen="data/plink/chr{CHR}.qc_filter2.pgen",
-        pvar="data/plink/chr{CHR}.qc_filter2.pvar",
-        psam="data/plink/chr{CHR}.qc_filter2.psam",
+        pgen="data/plink/chr{CHR}.site-qc.var-qc.pgen",
+        pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar",
+        psam="data/plink/chr{CHR}.site-qc.var-qc.psam",
         covariates=COVARIATES_FILE
     output:
         "data/plink/chr{CHR}.test_freeze.missing"
     params:
-        pfile_prefix="data/plink/chr{CHR}.qc_filter2",
+        pfile_prefix="data/plink/chr{CHR}.site-qc.var-qc",
         bed_prefix="data/plink/chr{CHR}.bed_freeze_temp",
         sample_list="data/plink/chr{CHR}.freeze_sample_list.txt",
         pheno_file="data/plink/chr{CHR}.pheno_freeze.txt",
@@ -202,7 +202,7 @@ rule prepare_diff_miss_plot_data:
         freeze_fail="data/qc/exclusions/diff_miss_freeze_fail_variants.txt",
         cc_tests=expand("data/plink/chr{CHR}.test.missing",CHR=CHROMOSOMES_AUTOSOMAL),
         freeze_tests=expand("data/plink/chr{CHR}.test_freeze.missing",CHR=CHROMOSOMES_AUTOSOMAL),
-        pvars=expand("data/plink/chr{CHR}.qc_filter2.pvar",CHR=CHROMOSOMES_AUTOSOMAL),
+        pvars=expand("data/plink/chr{CHR}.site-qc.var-qc.pvar",CHR=CHROMOSOMES_AUTOSOMAL),
     output:
         "data/qc/reports/diff_miss_bias_snps_for_plots.tsv"
     params:

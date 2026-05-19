@@ -82,11 +82,11 @@ This report summarizes quality control performed on whole exome sequencing data 
 
 ## QC Pipeline Steps (updated: build + annotation workflow)
 
-This report supports the **updated pipeline** using `build_files.smk` and `annotation_files.smk`:
+This report supports the **current pipeline** using `select_variants3.smk`, `build_files.smk`, and `annotation_files3.smk`:
 
 1. **Sex check** (main workflow): ChrX F-statistic; ambiguous samples excluded.
-2. **Variant QC (build)**: Geno, MAF, HWE, SNPs only per chromosome → `qc_filter2` (no LD on chr files).
-3. **Sample missingness (build)**: Per-chromosome missingness is computed on `qc_filter2`, then aggregated to apply the MIND threshold.
+2. **Variant QC (build)**: Geno, MAF, HWE, SNPs only per chromosome → `site-qc.var-qc` (no LD on chr files).
+3. **Sample missingness (build)**: Per-chromosome missingness is computed on `site-qc.var-qc`, then aggregated to apply the MIND threshold.
    Samples passing MIND are merged across autosomes into **merge_mind**.
 4. **LD pruning (build)**: Performed on **merge_mind** only (`--indep-pairwise`; chr8 and long-LD regions excluded).
    Output (`merge_mind.prune.in/.out`) is used for PCA and heterozygosity only and does not remove variants from the final **build** dataset.
@@ -94,8 +94,12 @@ This report supports the **updated pipeline** using `build_files.smk` and `annot
    Outlier samples are removed from **merge_mind** to create **build**, while keeping the full post-QC SNP set in **build**.
 6. **PCA**: Runs on **build** samples while restricting variants to `merge_mind.prune.in` (with chr/long-LD exclusions in the PCA rule).
    Outputs include `build_pca.eigenvec`, `build_pca.eigenval`, and `build_pca.eigenvec.allele`; loading plots use positions from `build.pvar`.
-7. **Annotation (annotation_files)**: Subset to build passing samples → first VEP → exclude MNP from annotation VCF → MNP genotype path (split, correct, concat, sort) → two concat+sorts: genotype BCF and annotation VEP VCF → final annotation pgen and `annotation.no_sample.vep.report.csv`.
-8. **PCA outlier filtering**: Define outliers as **PC4 > 0.3**, then recompute clean PCA (`build_pca_clean.*`) for ancestry covariates and plots.
+7. **PCA outlier filtering and recompute (build_files)**: Define outliers as **PC4 > 0.3**, then recompute clean PCA (`build_pca_clean.*`) for ancestry covariates and plots.
+8. **Annotation base (annotation_files3)**: Subset to build-passing samples (`site-qc.het_miss`) and run first no-sample VEP parse.
+9. **MNP branch (mnp.smk split path)**: Detect candidate pairs, run sample-level PASS/read-check filtering, rewrite MNP genotypes, and generate MNP no-sample VEP outputs.
+10. **Rejoin after MNP**: Merge adjusted MNP records back into both genotype BCF and no-sample VEP track.
+11. **Rare variant freeze QC (rare_variant_qc.smk)**: Controls-only Freeze2 vs Freeze3 missingness/carrier tests; generate flagged IDs and merged exclusion list.
+12. **Final annotation after exclusions**: Exclude flagged IDs from post-MNP genotype/annotation tracks, then produce final annotation pgen and `annotation.no_sample.vep.report.csv`.
 
 Unless explicitly stated, filtering steps are cumulative, and counts reflect the dataset at that stage of the pipeline.
 
@@ -202,7 +206,7 @@ prefilter_counts <- lapply(1:22, function(chr) {
 }) %>% bind_rows()
 if (nrow(prefilter_counts) == 0) message("No prefilter.variant_types.txt found (main workflow).")
 
-# Load variant type counts (postfilter: main workflow qc_filter1; optional)
+# Load variant type counts (postfilter: main workflow site-qc; optional)
 postfilter_counts <- lapply(1:22, function(chr) {
   f <- file.path(DATA_DIR, "qc/reports", paste0("chr", chr, ".postfilter.variant_types.txt"))
   if (file.exists(f)) {
@@ -228,10 +232,10 @@ plink_filter_metrics <- lapply(1:22, function(chr) {
   else data.frame(CHR = integer(0), FILTER = character(0), VARIANTS_REMOVED = numeric(0))
 }) %>% bind_rows()
 
-# Load variant QC metrics for distribution plots (build_files: chr*.afreq / .vmiss / .hardy on qc_filter2)
+# Load variant QC metrics for distribution plots (build_files: chr*.site-qc.var-qc.{afreq,vmiss,hardy})
 # When a file is missing, return 0-row df so we only have rows with real data (no NA placeholders).
 variant_maf <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".afreq"))
+  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".site-qc.var-qc.afreq"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
       mutate(CHR = chr)
@@ -239,7 +243,7 @@ variant_maf <- lapply(1:22, function(chr) {
 }) %>% bind_rows()
 
 variant_miss <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".vmiss"))
+  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".site-qc.var-qc.vmiss"))
   if (file.exists(f)) {
     read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "") %>%
       mutate(CHR = chr)
@@ -247,7 +251,7 @@ variant_miss <- lapply(1:22, function(chr) {
 }) %>% bind_rows()
 
 variant_hwe <- lapply(1:22, function(chr) {
-  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".hardy"))
+  f <- file.path(DATA_DIR, "plink", paste0("chr", chr, ".site-qc.var-qc.hardy"))
   if (file.exists(f)) {
     d <- read.table(f, header = TRUE, stringsAsFactors = FALSE, comment.char = "")
     d$CHR <- chr
@@ -576,7 +580,7 @@ ggplot(variant_summary_long, aes(x = TYPE, y = Count, fill = Filter_Stage)) +
 - **Minor Allele Frequency**: `--maf `r MAF_THR`` (`r MAF_THR * 100`%)
 - **Hardy-Weinberg Equilibrium**: `--hwe `r HWE_THR` midp`
 
-These are applied per chromosome to produce `qc_filter2`. Sample missingness is then calculated on these filtered SNPs. **LD pruning is not part of this step**—see **Section 5** (*LD pruning (merge_mind)*) after sample missingness.
+These are applied per chromosome to produce `site-qc.var-qc`. Sample missingness is then calculated on these filtered SNPs. **LD pruning is not part of this step**—see **Section 5** (*LD pruning (merge_mind)*) after sample missingness.
 
 ```{r plink-filtering}
 # Calculate totals
@@ -629,7 +633,7 @@ if (nrow(plink_filter_metrics) > 0 && "FILTER" %in% names(plink_filter_metrics) 
 These distributions show the spread of variant-level QC metrics and where thresholds are set.
 
 ```{r maf-below-threshold, fig.height=5}
-# MAF from data/plink/chr*.afreq (PLINK --freq). Variants below threshold only (what gets filtered out). Same as original.
+# MAF from data/plink/chr*.site-qc.var-qc.afreq (PLINK --freq). Variants below threshold only (what gets filtered out). Same as original.
 afreq_col <- if ("ALT_FREQS" %in% names(variant_maf)) "ALT_FREQS" else "ALT_FREQ"
 if (nrow(variant_maf) > 0 && afreq_col %in% names(variant_maf)) {
   variant_maf$MAF <- pmin(variant_maf[[afreq_col]], 1 - variant_maf[[afreq_col]])
@@ -653,12 +657,12 @@ if (nrow(variant_maf) > 0 && afreq_col %in% names(variant_maf)) {
     cat("No variants below the MAF threshold.\n")
   }
 } else {
-  cat("No MAF data: ensure data/plink/chr*.afreq exist (e.g. from build_files plink2_freq_missing_hardy_build).\n")
+  cat("No MAF data: ensure data/plink/chr*.site-qc.var-qc.afreq exist (e.g. from build_files plink2_freq_missing_hardy_build).\n")
 }
 ```
 
 ```{r geno-distribution, fig.height=5}
-# Variant genotype missingness (data/plink/chr*.vmiss). Same as original.
+# Variant genotype missingness (data/plink/chr*.site-qc.var-qc.vmiss). Same as original.
 if (nrow(variant_miss) > 0 && "F_MISS" %in% names(variant_miss)) {
   variant_miss_valid <- variant_miss %>% filter(!is.na(F_MISS))
   n_above <- sum(variant_miss_valid$F_MISS > GENO_THR)
@@ -677,7 +681,7 @@ if (nrow(variant_miss) > 0 && "F_MISS" %in% names(variant_miss)) {
     ) +
     theme_minimal())
 } else {
-  cat("No genotype missingness data: ensure data/plink/chr*.vmiss exist (e.g. from build_files plink2_freq_missing_hardy_build).\n")
+  cat("No genotype missingness data: ensure data/plink/chr*.site-qc.var-qc.vmiss exist (e.g. from build_files plink2_freq_missing_hardy_build).\n")
 }
 ```
 
@@ -707,7 +711,7 @@ if (nrow(variant_hwe) > 0 && "P" %in% names(variant_hwe)) {
     cat("No valid HWE P-values in data.\n")
   }
 } else {
-  cat("No HWE data: ensure data/plink/chr*.hardy exist (e.g. from build_files plink2_freq_missing_hardy_build).\n")
+  cat("No HWE data: ensure data/plink/chr*.site-qc.var-qc.hardy exist (e.g. from build_files plink2_freq_missing_hardy_build).\n")
 }
 ```
 
@@ -1031,7 +1035,7 @@ if (nrow(case_miss) > 0) {
 
 ## Method
 
-In `build_files.smk`, per-chromosome SNP filters produce `qc_filter2`; sample missingness (MIND) is applied; chromosomes are merged to **`merge_mind`** (mind-passing samples only). **LD pruning runs on `merge_mind`**, not on per-chr files: `--indep-pairwise 200 20 0.2`, excluding chromosome 8 and long-LD regions (e.g. HLA, 17q21.31). Outputs include `merge_mind.prune.in` and `merge_mind.prune.out`.
+In `build_files.smk`, per-chromosome SNP filters produce `site-qc.var-qc`; sample missingness (MIND) is applied; chromosomes are merged to **`merge_mind`** (mind-passing samples only). **LD pruning runs on `merge_mind`**, not on per-chr files: `--indep-pairwise 200 20 0.2`, excluding chromosome 8 and long-LD regions (e.g. HLA, 17q21.31). Outputs include `merge_mind.prune.in` and `merge_mind.prune.out`.
 
 This step does not remove variants from the final dataset. It only defines a subset of approximately independent SNPs for downstream statistical calculations (PCA and heterozygosity).
 

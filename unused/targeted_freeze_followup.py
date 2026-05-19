@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import subprocess
 import sys
@@ -6,19 +7,24 @@ import tempfile
 
 import pandas as pd
 
+#Defaults for ID list build.Edit here or pass CLI args.
+TOP_FLAGGED_DEFAULT=50
+GENES_DEFAULT="CHEK2,HEATR3"
+
 p=argparse.ArgumentParser(description="Per-variant case/control x freeze counts (missing,carrier) from het_miss mnp.gt BCFs.")
 p.add_argument("--covariates",required=True,help="Covariates with IID,STATUS,FREEZE (1=control,2=case)")
 p.add_argument("--passing-samples",required=True,help="Passing sample IDs one per line")
 p.add_argument("--variant-list",default="",help="Variant IDs one per line; if empty use --pathogenic-vus + --genes + --flagged-tsv")
 p.add_argument("--pathogenic-vus",default="",help="pathogenic_vus.csv for --genes pull")
-p.add_argument("--genes",default="CHEK2,HEATR3",help="Comma-separated genes to pull IDs from pathogenic_vus")
+p.add_argument("--genes",default=GENES_DEFAULT,help="Comma-separated genes to pull IDs from pathogenic_vus")
 p.add_argument("--flagged-tsv",default="",help="rare_variant_qc flagged TSV; top N variant_id merged when no variant-list")
-p.add_argument("--top-flagged",type=int,default=50,help="How many flagged variants to add when building list")
+p.add_argument("--top-flagged",type=int,default=TOP_FLAGGED_DEFAULT,help="How many flagged variants to add when building list")
 p.add_argument("--bcf-prefix",default="data/bcftools/chr",help="Prefix before CHR")
-p.add_argument("--bcf-suffix",default=".qc_filter1.het_miss.mnp.gt.bcf",help="Suffix after CHR")
+p.add_argument("--bcf-suffix",default=".site-qc.het_miss.mnp.gt.bcf",help="Suffix after CHR")
 p.add_argument("--output-ids",default="",help="Optional write merged variant ID list")
 p.add_argument("--ids-only",action="store_true",help="Only write --output-ids then exit")
 p.add_argument("--output",default="",help="Output stratified summary TSV (required unless --ids-only)")
+p.add_argument("--carrier-fisher-out",default="",help="Wide TSV with F2/F3 case-vs-control carrier Fisher; default from --output basename")
 args=p.parse_args()
 
 FREEZE_KEEP={"2","3"}
@@ -48,11 +54,25 @@ def status_cc(s):
     return 'UNKNOWN'
 
 def read_passing(path):
+    #IID-only lines OR FID IID: keep both tokens in set so membership matches covariates IID.never drop FID.
+    out=set()
     with open(path,'r') as f:
-        lines=[x.strip() for x in f if x.strip()]
-    if lines and lines[0].upper() in ('IID','#IID'):
-        lines=lines[1:]
-    return set(lines)
+        for raw in f:
+            line=raw.strip()
+            if not line:
+                continue
+            parts=line.split()
+            if len(parts)>=2:
+                a,b=parts[0].upper().replace('#',''),parts[1].upper().replace('#','')
+                if a=='FID' and b=='IID':
+                    continue
+                out.add(parts[0])
+                out.add(parts[1])
+            else:
+                if parts[0].upper().replace('#','') in ('IID','FID'):
+                    continue
+                out.add(parts[0])
+    return out
 
 def vid_chr(vid):
     p=str(vid).split('_',1)[0].replace('chr','')
@@ -67,6 +87,37 @@ def is_carrier(gt):
         return False
     a=gt.replace('|','/').split('/')
     return any(x not in {'0',''} for x in a)
+
+def logchoose(n,k):
+    if k<0 or k>n:
+        return float('-inf')
+    return math.lgamma(n+1)-math.lgamma(k+1)-math.lgamma(n-k+1)
+
+def hypergeom_prob(a,r1,r2,c1,n):
+    return math.exp(logchoose(r1,a)+logchoose(r2,c1-a)-logchoose(n,c1))
+
+def fisher_exact_two_sided(a,b,c,d):
+    r1=a+b
+    r2=c+d
+    c1=a+c
+    n=r1+r2
+    low=max(0,c1-r2)
+    high=min(r1,c1)
+    p_obs=hypergeom_prob(a,r1,r2,c1,n)
+    p=0.0
+    eps=1e-12
+    for x in range(low,high+1):
+        px=hypergeom_prob(x,r1,r2,c1,n)
+        if px<=p_obs+eps:
+            p+=px
+    return min(max(p,0.0),1.0)
+
+def carrier_case_control_fisher(ctrl_called,ctrl_carr,case_called,case_carr):
+    if ctrl_called<=0 or case_called<=0:
+        return None
+    ctrl_nc=ctrl_called-ctrl_carr
+    case_nc=case_called-case_carr
+    return fisher_exact_two_sided(ctrl_carr,ctrl_nc,case_carr,case_nc)
 
 def run_bcftools_query(bcf,sample_file,ids_file):
     cmd=['bcftools','query','-S',sample_file,'-i',f'ID=@{ids_file}','-f','%ID\t%TYPE[\t%GT]\n',bcf]
@@ -90,7 +141,9 @@ def build_variant_ids():
         pv.columns=[str(c).strip() for c in pv.columns]
         if 'ID' not in pv.columns or 'Gene' not in pv.columns:
             raise ValueError("pathogenic_vus needs ID and Gene columns")
-        genes=[g.strip() for g in args.genes.split(',') if g.strip()]
+        genes=[]
+        if args.genes.strip().upper() not in ('','NONE','-'):
+            genes=[g.strip() for g in args.genes.split(',') if g.strip()]
         for g in genes:
             sub=pv[pv['Gene'].astype(str)==g]['ID'].astype(str).unique().tolist()
             ids.extend(sub)
@@ -140,6 +193,7 @@ def main():
         by_chr[c].append(vid)
     os.makedirs(os.path.dirname(args.output) or '.',exist_ok=True)
     rows_out=[]
+    rows_fisher=[]
     for chrom,vids in sorted(by_chr.items(),key=lambda x:int(x[0]) if str(x[0]).isdigit() else 99):
         bcf=f"{args.bcf_prefix}{chrom}{args.bcf_suffix}"
         if not os.path.isfile(bcf):
@@ -183,6 +237,7 @@ def main():
             gts=parts[2:]
             if len(gts)!=len(sample_order):
                 raise ValueError(f"{vid}: got {len(gts)} genotypes expected {len(sample_order)}")
+            cell={}
             for fr in FREEZE_KEEP:
                 for st in ('control','case'):
                     key=(fr,st)
@@ -193,14 +248,34 @@ def main():
                     carr=sum(1 for i in ii if (not is_missing(gts[i])) and is_carrier(gts[i]))
                     mr=(miss/n) if n else None
                     cr=(carr/called) if called else None
+                    cell[(fr,st)]={'n_total':n,'n_missing':miss,'n_called':called,'n_carrier':carr,'missing_rate':mr,'carrier_rate_called':cr}
                     rows_out.append({
                         'variant_id':vid,'variant_type':vtype,'freeze':fr,'status':st,
                         'n_total':n,'n_missing':miss,'n_called':called,'n_carrier':carr,
                         'missing_rate':mr,'carrier_rate_called':cr
                     })
+            f2c=cell[('2','control')]
+            f2a=cell[('2','case')]
+            f3c=cell[('3','control')]
+            f3a=cell[('3','case')]
+            p2=carrier_case_control_fisher(f2c['n_called'],f2c['n_carrier'],f2a['n_called'],f2a['n_carrier'])
+            p3=carrier_case_control_fisher(f3c['n_called'],f3c['n_carrier'],f3a['n_called'],f3a['n_carrier'])
+            rows_fisher.append({
+                'variant_id':vid,'variant_type':vtype,
+                'f2_control_called':f2c['n_called'],'f2_control_carrier':f2c['n_carrier'],
+                'f2_case_called':f2a['n_called'],'f2_case_carrier':f2a['n_carrier'],
+                'f2_carrier_fisher_p':p2,
+                'f3_control_called':f3c['n_called'],'f3_control_carrier':f3c['n_carrier'],
+                'f3_case_called':f3a['n_called'],'f3_case_carrier':f3a['n_carrier'],
+                'f3_carrier_fisher_p':p3
+            })
     out_df=pd.DataFrame(rows_out)
     out_df.to_csv(args.output,sep='\t',index=False)
     print(f"wrote {len(out_df)} rows to {args.output}",file=sys.stderr)
+    fisher_path=args.carrier_fisher_out or (os.path.splitext(args.output)[0]+'_carrier_fisher.tsv')
+    fisher_df=pd.DataFrame(rows_fisher)
+    fisher_df.to_csv(fisher_path,sep='\t',index=False)
+    print(f"wrote {len(fisher_df)} rows to {fisher_path}",file=sys.stderr)
 
 if __name__=='__main__':
     main()

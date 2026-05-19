@@ -35,48 +35,29 @@ digraph qc_workflow {
   edge [fontname=Helvetica,fontsize=9]
   
   input [label='Input BCF Files\nPer chromosome (chr1-22, chrX)',fillcolor='#E8F4F8',shape=folder]
-  goldilocks [label='Goldilocks Filtering\n(Applied by DNAnexus/GLnexus)\nDP≥7, GQ≥20, AB filters',fillcolor='#FFF4E6']
+  sex_check [label='Step 1: Sex Check (chrX)\nexclude ambiguous samples',fillcolor='#D4EDDA']
+  site_qc [label='Step 2: Site-level QC (select_variants3)\nsite-qc.bcf + site-qc.pgen',fillcolor='#D4EDDA']
+  build [label='Step 3: Build dataset (build_files)\nvariant QC, sample missingness,\nhet outliers, build.pgen',fillcolor='#D4EDDA']
+  pca [label='Step 4: PCA on build\nbuild_pca.*',fillcolor='#D4EDDA']
+  pca_clean [label='Step 5: PCA outlier filtering\nPC4 > 0.3 + build_pca_clean.*',fillcolor='#D4EDDA']
+  anno_base [label='Step 6: Annotation base\nsite-qc variants + passing samples\nsite-qc.het_miss + first no-sample VEP',fillcolor='#E8F4F8']
+  mnp_branch [label='Step 7: MNP branch (mnp.smk)\nfind/test/read-check/filter\nrewrite MNP GT + MNP VEP',fillcolor='#FFF4E6']
+  anno_rejoin [label='Step 8: Rejoin post-MNP\nmerge adjusted MNP into GT+VEP tracks',fillcolor='#E8F4F8']
+  rv_qc [label='Step 9: Rare variant freeze QC\n(controls-only missingness/carrier)\nflagged IDs + exclusion list',fillcolor='#D4EDDA']
+  anno_final [label='Step 10: Final annotation outputs\nexclude flagged IDs\nannotation pgen + VEP CSV',fillcolor='#A8D5BA',shape=folder]
   
-  sex_convert [label='Step 1a: Convert chrX to PLINK',fillcolor='#E8F4F8']
-  sex_check [label='Step 1b: Sex Check\nPLINK2 --check-sex on chrX',fillcolor='#D4EDDA']
-  sex_exclude [label='Sex Check Failures',fillcolor='#F8D7DA',shape=note]
-  
-  bcf_filter [label='Step 2: BCFtools Filter\nExclude sex check failures\nNoHQHet filter\nPASS variants only',fillcolor='#D4EDDA']
-  bcf_stats [label='Variant Counts\nSNP/INDEL pre/post',fillcolor='#E8F4F8',shape=note]
-  
-  plink_convert [label='Step 3: Convert to PLINK2\nPer chromosome pgen format',fillcolor='#E8F4F8']
-  
-  var_qc [label='Step 4: Variant-Level QC\n--geno 0.05 (missingness)\n--maf 0.01 (frequency)\n--hwe 1e-6 midp (equilibrium)',fillcolor='#D4EDDA']
-  
-  miss_calc [label='Step 5: Sample Missingness\nAggregate across chr1-22\nF_MISS threshold: 0.01',fillcolor='#D4EDDA']
-  miss_exclude [label='High Missingness Samples',fillcolor='#F8D7DA',shape=note]
-  
-  het_calc [label='Step 6: Heterozygosity\nCalculate per chromosome\nAggregate chr1-22\n|Fhat|>3 SD threshold',fillcolor='#D4EDDA']
-  het_exclude [label='Heterozygosity Outliers',fillcolor='#F8D7DA',shape=note]
-  
-  merge [label='Step 7: Merge Chromosomes\nExclude: high missingness, het outliers',fillcolor='#E8F4F8']
-  pca [label='Step 8: PCA\n20 components, approx method\nFor covariates and visual QC',fillcolor='#D4EDDA']
-  
-  output [label='QC Outputs\nFiltered variant IDs per chr\nPassing sample list\nPCA eigenvectors',fillcolor='#A8D5BA',shape=folder]
-  
-  input -> goldilocks
-  goldilocks -> sex_convert
-  sex_convert -> sex_check
-  sex_check -> sex_exclude
-  sex_exclude -> bcf_filter
-  goldilocks -> bcf_filter
-  bcf_filter -> bcf_stats
-  bcf_filter -> plink_convert
-  plink_convert -> var_qc
-  var_qc -> miss_calc
-  miss_calc -> miss_exclude
-  miss_calc -> het_calc
-  het_calc -> het_exclude
-  het_calc -> merge
-  miss_exclude -> merge
-  het_exclude -> merge
-  merge -> pca
-  pca -> output
+  input -> sex_check
+  sex_check -> site_qc
+  site_qc -> build
+  build -> pca
+  pca -> pca_clean
+  site_qc -> anno_base
+  build -> anno_base
+  anno_base -> mnp_branch
+  mnp_branch -> anno_rejoin
+  anno_base -> anno_rejoin
+  anno_rejoin -> rv_qc
+  rv_qc -> anno_final
   
   subgraph cluster_legend {
     label='Legend'

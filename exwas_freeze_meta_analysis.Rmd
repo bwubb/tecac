@@ -14,8 +14,11 @@ params:
   out_dir: "meta"
   regenie_dir_f2: "FREEZE2/data/final"
   regenie_dir_f3: "FREEZE3/data/final"
-  project_f2: "PMBB-F2-TGCT-ExWAS-17a"
-  project_f3: "PMBB-F3-TGCT-ExWAS-17a"
+  project_f2: "PMBB-F2-TGCT-ExWAS-17-PC-FreezeQC"
+  project_f3: "PMBB-F3-TGCT-ExWAS-17-PC-FreezeQC"
+  # Stem between ".chrN." and ".regenie". REGENIE appends _<phenoCol> (e.g. _STATUS) to --out, so
+  # --out ...step2_gene_based_STATUS.freeze_qc_candidate → ...freeze_qc_candidate_STATUS.regenie on disk.
+  step2_gene_based_mid: "step2_gene_based_STATUS.freeze_qc_candidate_STATUS"
   tests_keep: ""
   masks_keep: ""
   thresh_keep: ""
@@ -77,19 +80,22 @@ dir.create(params$out_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Goal
 
-Compare Freeze 2 vs Freeze 3 gene-based results.
+This report evaluates **cross-freeze consistency under strong freeze/sample imbalance**: Freeze 3 carries substantially more case information than Freeze 2. **Stronger signals in Freeze 3 are therefore expected for many rare tests and are not, by themselves, evidence against biology.** Conversely, **lack of Freeze 2 support for rare signals does not imply absence of effect**—it often reflects **carrier sparsity and power imbalance**, not a clean “failed in F2” verdict.
 
-This report is for exploratory comparison only. Differences between freezes are treated as signals to investigate (e.g. missingness, capture differences, or power), not as conclusions.
+The notebook is **not** a neutral results-ranking meta-analysis. It is a **pre-specified stratified comparison framework** for triage: where do the two freezes agree in direction and stability, where does one freeze dominate numerically, and where do estimates conflict badly enough to quarantine for review?
 
-This report is not intended to determine whether signals are true or false, only to identify where cross-freeze discrepancies exist.
+This report is for **exploratory comparison only**. Freeze differences are interpreted as a **mix of power imbalance and residual technical/capture structure**, not as a simple artifact-vs-truth dichotomy.
 
-Methods in brief: **ADD** uses inverse-variance meta (same-direction rows only); **SKAT / SKATO** use Fisher combination of *p*-values. Full detail is in CSVs; this document supports comparison and diagnostic follow-up.
+Methods in brief: for **ADD**, inverse-variance (IVW) meta is computed on all overlapping rows with finite betas and SEs in both freezes; interpretation then uses direction, heterogeneity, and Freeze-3 dominance flags. For **SKAT/SKATO**, Fisher’s method is used as the **single** exploratory combined *p*-value summary, shown alongside the per-freeze *p*-values.
+
+Accordingly, meta-analytic summaries are interpreted in the context of freeze-specific precision and dominance, rather than as simple pooled effect estimates.
 
 ### How to use this report
 
-- Use **Table B** (consistent same-direction ADD rows) for cross-freeze consistency.  
-- Use **Table C** (Freeze 3 stronger than Freeze 2) for Freeze-3-driven signals.  
-- Use **Table D** and **CHEK2 discrepancy** for opposite-sign or pattern mismatches and discrepancy follow-up (gene-level only).
+- Use **Table B** (consistent-direction ADD subset) for cross-freeze consistency.  
+- Use **Table C** (Freeze 3 stronger than Freeze 2) for Freeze-3-driven *p*-value patterns.  
+- Use **Table D** and **CHEK2 discrepancy** for opposite-sign or pattern mismatches; use **`DOMINATED_BY_F3`** / **F3-dominated** priority for “F3 signal, limited F2 precision in the IVW” (gene-level only).  
+- For **SKAT/SKATO**, read **`FISHER_P`** only together with **`PVAL_F2`** and **`PVAL_F3`**; Fisher is the combined triage metric, not a replacement for the per-freeze results.
 
 ---
 
@@ -97,10 +103,37 @@ Methods in brief: **ADD** uses inverse-variance meta (same-direction rows only);
 
 ```{r load-files, echo=FALSE}
 #' Read chr1–22 step2 gene-based .regenie for one freeze; same parsing as report_regenie.Rmd.
-load_regenie_gene_based <- function(project_name, regenie_dir) {
+#' Resolves stem: REGENIE writes {--out}_STATUS.regenie for binary --phenoCol STATUS, so YAML may
+#' give either ...freeze_qc_candidate or ...freeze_qc_candidate_STATUS.
+gene_based_mid_candidates <- function(mid) {
+  u <- unique(c(mid, paste0(mid, "_STATUS")))
+  if (nzchar(mid) && endsWith(mid, "_STATUS")) {
+    u <- unique(c(u, sub("_STATUS$", "", mid)))
+  }
+  u
+}
+
+load_regenie_gene_based <- function(project_name, regenie_dir, step2_gene_based_mid) {
+  cands <- gene_based_mid_candidates(step2_gene_based_mid)
+  mid_use <- NULL
+  for (m in cands) {
+    fp1 <- file.path(regenie_dir, paste0(project_name, ".chr1.", m, ".regenie"))
+    if (file.exists(fp1)) {
+      mid_use <- m
+      break
+    }
+  }
+  if (is.null(mid_use)) {
+    stop(
+      "No gene-based .regenie for project ", project_name, " under ", regenie_dir,
+      " (tried stems: ", paste(cands, collapse = ", "), ")"
+    )
+  }
+  message("Gene-based REGENIE stem (chrN.", mid_use, ".regenie): ", mid_use)
+
   lst <- list()
   for (i in 1:22) {
-    fp <- file.path(regenie_dir, paste0(project_name, ".chr", i, ".step2_gene_based_STATUS.regenie"))
+    fp <- file.path(regenie_dir, paste0(project_name, ".chr", i, ".", mid_use, ".regenie"))
     if (file.exists(fp)) {
       lst[[length(lst) + 1]] <- readr::read_delim(
         fp, delim = " ", col_names = TRUE, trim_ws = TRUE, comment = "#", show_col_types = FALSE
@@ -108,7 +141,10 @@ load_regenie_gene_based <- function(project_name, regenie_dir) {
     }
   }
   if (!length(lst)) {
-    stop("No .step2_gene_based_STATUS.regenie files for project ", project_name, " under ", regenie_dir)
+    stop(
+      "No gene-based .regenie files for project ", project_name,
+      " (stem *.", mid_use, ".regenie) under ", regenie_dir
+    )
   }
   tb <- bind_rows(lst)
   for (col in c("A1FREQ", "A1FREQ_CASES", "A1FREQ_CONTROLS")) {
@@ -136,13 +172,17 @@ load_regenie_gene_based <- function(project_name, regenie_dir) {
     )
 }
 
-f2_long <- load_regenie_gene_based(params$project_f2, params$regenie_dir_f2)
-f3_long <- load_regenie_gene_based(params$project_f3, params$regenie_dir_f3)
+f2_long <- load_regenie_gene_based(
+  params$project_f2, params$regenie_dir_f2, params$step2_gene_based_mid
+)
+f3_long <- load_regenie_gene_based(
+  params$project_f3, params$regenie_dir_f3, params$step2_gene_based_mid
+)
 
 message(
   "REGENIE gene-based dirs — F2: ", params$regenie_dir_f2,
-  " (project ", params$project_f2, ") | F3: ", params$regenie_dir_f3,
-  " (project ", params$project_f3, ")"
+  " (project ", params$project_f2, ", mid ", params$step2_gene_based_mid, ") | F3: ",
+  params$regenie_dir_f3, " (project ", params$project_f3, ")"
 )
 
 readr::write_csv(
@@ -169,6 +209,34 @@ f3 <- f3_long %>%
   )
 
 message("Freeze 2 rows: ", nrow(f2), " | Freeze 3 rows: ", nrow(f3))
+```
+
+```{r sample-size-summary, echo=FALSE}
+ss <- dplyr::bind_rows(
+  f2_long %>%
+    dplyr::summarise(
+      Freeze = "F2",
+      gene_test_rows = dplyr::n(),
+      median_N_cases = stats::median(N_CASES, na.rm = TRUE),
+      median_N_controls = stats::median(N_CONTROLS, na.rm = TRUE),
+      unique_N_cases = dplyr::n_distinct(N_CASES),
+      unique_N_controls = dplyr::n_distinct(N_CONTROLS)
+    ),
+  f3_long %>%
+    dplyr::summarise(
+      Freeze = "F3",
+      gene_test_rows = dplyr::n(),
+      median_N_cases = stats::median(N_CASES, na.rm = TRUE),
+      median_N_controls = stats::median(N_CONTROLS, na.rm = TRUE),
+      unique_N_cases = dplyr::n_distinct(N_CASES),
+      unique_N_controls = dplyr::n_distinct(N_CONTROLS)
+    )
+)
+knitr::kable(
+  ss,
+  digits = 2,
+  caption = "Per-freeze row counts (all gene-test rows loaded) and distribution of per-row N_CASES / N_CONTROLS (anchors the case-count imbalance before filters)."
+)
 ```
 
 ---
@@ -247,7 +315,11 @@ message("Wrote unmatched keys: ", file.path(params$out_dir, "only_F2.csv"), " | 
 message("Wrote ADD-SKATO-only unmatched: ", file.path(params$out_dir, "only_F2_SKATO.csv"), " | ", file.path(params$out_dir, "only_F3_SKATO.csv"))
 ```
 
+Unmatched keys in **`only_F2.csv`** / **`only_F3.csv`** can reflect **freeze-specific variant-set composition**, **differences in annotation / set construction**, or **model output present in only one freeze**—they are **not automatically a QC failure** of the join logic.
+
 # 3b. SKAT/SKATO
+
+Fisher’s method **combines evidence from two *p*-values**; it **does not combine effect directions** and can be **driven by one very small freeze-specific *p***. Use the SKAT/SKATO block **only for exploratory triage and ranking**, not for primary claims. In this notebook, Fisher’s method is the **only** combined summary used for SKAT/SKATO; the per-freeze *p*-values are retained for interpretation and to detect one-freeze-driven signals.
 
 ```{r meta-fisher-vc, echo=FALSE}
 fisher_two_p <- function(p1, p2) {
@@ -272,7 +344,16 @@ meta_skat <- merged %>%
     BOTH_FREEZE_NOMINAL = PVAL_F2 <= psup & PVAL_F3 <= psup,
     BOTH_FREEZE_WEAK = PVAL_F2 <= pwk & PVAL_F3 <= pwk
   ) %>%
-  mutate(FISHER_P_ADJ = p.adjust(FISHER_P, method = "BH")) %>%
+  mutate(FISHER_P_ADJ = p.adjust(FISHER_P, method = "BH"))
+
+meta_skat <- meta_skat %>%
+  mutate(
+    priority = case_when(
+      FISHER_P_ADJ <= 0.05 & BOTH_FREEZE_WEAK ~ "High",
+      FISHER_P_ADJ <= 0.1 & BOTH_FREEZE_WEAK ~ "Medium",
+      TRUE ~ "Review"
+    )
+  ) %>%
   arrange(FISHER_P_ADJ, FISHER_P)
 
 meta_skato <- merged %>%
@@ -295,7 +376,7 @@ meta_skato <- merged %>%
 meta_skato <- meta_skato %>%
   mutate(
     priority = case_when(
-      FISHER_P_ADJ <= 0.05 & BOTH_FREEZE_NOMINAL ~ "High",
+      FISHER_P_ADJ <= 0.05 & BOTH_FREEZE_WEAK ~ "High",
       FISHER_P_ADJ <= 0.1 & BOTH_FREEZE_WEAK ~ "Medium",
       TRUE ~ "Review"
     )
@@ -307,7 +388,7 @@ message("ADD-SKAT rows (merged): ", nrow(meta_skat), " | ADD-SKATO rows (merged)
 
 ---
 
-# 4. ADD
+# 4. ADD — IVW meta (all IVW-eligible overlap) with consistency / heterogeneity / dominance tiers
 
 ```{r meta-ivw, echo=FALSE}
 # w_i = 1/SE^2; applies only to TEST == ADD (directional log-OR scale)
@@ -325,23 +406,33 @@ meta_ivw2 <- function(b1, se1, b2, se2) {
 }
 
 merged_add_all <- merged %>% dplyr::filter(TEST == "ADD")
-merged_add <- merged_add_all %>%
-  dplyr::filter(is.finite(BETA_F2), is.finite(BETA_F3), sign(BETA_F2) == sign(BETA_F3))
+merged_add_ivw <- merged_add_all %>%
+  dplyr::filter(
+    is.finite(BETA_F2), is.finite(BETA_F3),
+    is.finite(SE_F2), is.finite(SE_F3), SE_F2 > 0, SE_F3 > 0
+  )
+n_discord <- merged_add_all %>%
+  dplyr::filter(
+    is.finite(BETA_F2), is.finite(BETA_F3),
+    sign(BETA_F2) != 0, sign(BETA_F3) != 0,
+    sign(BETA_F2) != sign(BETA_F3)
+  ) %>%
+  nrow()
 
 message(
   "ADD rows (inner merge): ", nrow(merged_add_all),
-  " | IVW meta after sign(BETA_F2)==sign(BETA_F3): ", nrow(merged_add),
-  " (excluded ", nrow(merged_add_all) - nrow(merged_add), " discordant or non-finite beta rows)"
+  " | IVW-eligible (finite BETA/SE, SE>0): ", nrow(merged_add_ivw),
+  " | opposite-sign overlap (Table D scope): ", n_discord
 )
 
-meta_add_df <- merged_add %>%
+meta_add_df <- merged_add_ivw %>%
   bind_cols(meta_ivw2(.$BETA_F2, .$SE_F2, .$BETA_F3, .$SE_F3)) %>%
   mutate(
     META_OR = exp(META_BETA),
     META_P_ADJ = p.adjust(META_P, method = "BH")
   )
 
-message("ADD rows for IVW meta: ", nrow(meta_add_df))
+message("ADD rows entering IVW + flags (meta_add_df): ", nrow(meta_add_df))
 ```
 
 ---
@@ -433,9 +524,11 @@ meta_add_df <- meta_add_df %>%
   mutate(
     priority = case_when(
       OPPOSITE_DIRECTION ~ "Discordant",
+      DOMINATED_BY_F3 ~ "F3-dominated",
+      CONSISTENT_DIRECTION & HET_FLAG ~ "Review",
       is.finite(META_P) & META_P <= p_strong & CONSISTENT_DIRECTION & reasonable_se &
-        reasonable_beta & !HETEROGENEITY & min_support_ok ~ "High",
-      ((strong_F2 & weak_F3) | (strong_F3 & weak_F2)) & !OPPOSITE_DIRECTION ~ "Medium",
+        reasonable_beta & not_wild_diff & !HET_FLAG & min_support_ok ~ "High",
+      ((strong_F2 & weak_F3) | (strong_F3 & weak_F2)) & CONSISTENT_DIRECTION ~ "Medium",
       TRUE ~ "Review"
     )
   )
@@ -443,11 +536,13 @@ meta_add_df <- meta_add_df %>%
 
 `P_HET` = Cochran-style *Q* p-value (same as `Q_P`); `HET_FLAG` marks *P*~het~ \< 0.05 (review, do not auto-drop). Longer definitions → **Notes**.
 
+**Stability thresholds** (`abs_beta_max_reasonable`, `se_max_reasonable`, `abs_beta_diff_max` from YAML) are **pragmatic guards** to de-prioritize rows with implausibly unstable betas/SEs or huge cross-freeze beta gaps—they are **not formal exclusion criteria** and should not be read as “curating truth.”
+
 ---
 
 # 5b. SKAT/SKATO
 
-**Columns in the tables below:** **`PVAL_F2`**, **`PVAL_F3`** — REGENIE gene-based *p*-values per freeze. **`FISHER_P`** — Fisher’s method combining those two *p*-values (χ² on 4 df; non-directional, no joint effect size). **`FISHER_P_ADJ`** — Benjamini–Hochberg adjustment of **`FISHER_P`** within this SKAT or SKATO block. **`DOMINANT_FREEZE`**, **`BOTH_FREEZE_NOMINAL`**, **`BOTH_FREEZE_WEAK`**, **`priority`** — exploratory triage labels (see **Notes**).
+**Columns in the tables below:** **`PVAL_F2`** and **`PVAL_F3`** are the REGENIE gene-based *p*-values for each freeze. **`FISHER_P`** is the **single** exploratory combined *p*-value summary used here for SKAT/SKATO; it is shown together with the per-freeze *p*-values so one-freeze-driven signals remain visible. **`FISHER_P_ADJ`** — Benjamini–Hochberg adjustment of **`FISHER_P`** within this SKAT or SKATO block. **`DOMINANT_FREEZE`** (SKATO only), **`BOTH_FREEZE_NOMINAL`**, **`BOTH_FREEZE_WEAK`**, **`priority`** — exploratory triage labels (see **Notes**): **High** requires **`FISHER_P_ADJ` ≤ 0.05** and **`BOTH_FREEZE_WEAK`** (weak support in **both** freezes).
 
 ```{r tables-vc, echo=FALSE}
 vc_show <- function(df, title) {
@@ -480,11 +575,9 @@ vc_show(meta_skat, "SKAT")
 
 # 6. Results
 
-ADD meta uses **same-direction** rows only; **Discordant** is the full-overlap opposite-sign set (no IVW *p*).
+**ADD (inverse-variance):** **IVW** (`META_P`, `META_P_ADJ`, `META_BETA`, …) is computed on **every overlapping ADD row with finite `BETA` and `SE` in both freezes**, **without pre-filtering by direction** (`1/SE²` weights)—the usual fixed-effect two-study summary. **Interpretation** is tiered afterward: **`CONSISTENT_DIRECTION`** vs **`OPPOSITE_DIRECTION`**, **`HET_FLAG`** (*Q* heterogeneity), and **`DOMINATED_BY_F3`** (`WEIGHT_RATIO` \> 0.8; F3-driven combined estimate with limited F2 precision contribution). **Opposite-sign rows** stay in **`meta_add_df`** for a transparent pooled *p*, and are **also surfaced in Table D** because the pooled effect is **not** a directional-agreement summary.
 
-Only **same-direction ADD** overlap rows are inverse-variance meta-analyzed (IVW *p* and FDR); opposite-sign rows appear in Table D without a combined effect.
-
-**Columns in Tables A–C and the comparison shortlist:** **`PVAL_F2`**, **`PVAL_F3`** — REGENIE ADD *p*-values per freeze. **`META_BETA`**, **`META_SE`**, **`META_Z`**, **`META_P`** — inverse-variance meta across freezes (`1/SE²` weights) when `sign(BETA_F2)==sign(BETA_F3)`; **`META_P`** is two-sided from **`META_Z`** (computed in this report, not a REGENIE column). **`META_P_ADJ`** — BH FDR of **`META_P`** across all same-direction ADD rows (`meta_add_df`). **`HET_FLAG`** — TRUE if heterogeneity **`Q_P`** \< 0.05 (Cochran *Q* vs **`META_BETA`**; same as **`P_HET`** in CSVs). Full exports also include **`WEIGHT_F2`**, **`WEIGHT_F3`**, **`WEIGHT_RATIO`**, betas/SEs, **`META_OR`**.
+**Columns in Tables A–C and the comparison shortlist:** **`PVAL_F2`**, **`PVAL_F3`** — REGENIE ADD *p*-values per freeze. **`META_BETA`**, **`META_SE`**, **`META_Z`**, **`META_P`** — IVW on **all IVW-eligible overlap rows**; **`META_P`** is two-sided from **`META_Z`**. **`META_P_ADJ`** — BH FDR of **`META_P`** across **`meta_add_df`** (full IVW pool). **`HET_FLAG`** — TRUE if **`Q_P`** \< 0.05 (Cochran *Q* vs **`META_BETA`**; same as **`P_HET`** in CSVs). **`CONSISTENT_DIRECTION`**, **`OPPOSITE_DIRECTION`**, **`DOMINATED_BY_F3`**, **`WEIGHT_RATIO`**. Exports include **`WEIGHT_F2`**, **`WEIGHT_F3`**, betas/SEs, **`META_OR`**.
 
 ```{r tables-abcd}
 show_tbl <- function(df, n = 50) {
@@ -495,7 +588,7 @@ show_tbl <- function(df, n = 50) {
     scroll_box(width = "100%", height = "560px")
 }
 
-## A. All same-direction ADD (IVW)
+## A (data). All IVW-eligible overlapping ADD rows
 table_a <- meta_add_df %>% arrange(META_P, PVAL_F3, PVAL_F2)
 
 ## B. Consistent (Table B filters)
@@ -512,32 +605,43 @@ table_c <- meta_add_df %>%
   ) %>%
   arrange(PVAL_F3, META_P)
 
-## D. Discordant ADD overlap
+## D. Discordant ADD overlap (opposite non-zero beta signs)
 table_d <- merged_add_all %>%
   dplyr::filter(
     is.finite(BETA_F2),
     is.finite(BETA_F3),
+    sign(BETA_F2) != 0, sign(BETA_F3) != 0,
     sign(BETA_F2) != sign(BETA_F3)
+  ) %>%
+  dplyr::left_join(
+    meta_add_df %>%
+      dplyr::select(
+        GENE, MASK, THRESH, META_P, META_P_ADJ, HET_FLAG, WEIGHT_RATIO, DOMINATED_BY_F3
+      ),
+    by = c("GENE", "MASK", "THRESH")
   ) %>%
   arrange(pmin(PVAL_F2, PVAL_F3, na.rm = TRUE))
 ```
 
-## A. All same-direction ADD rows
+## A. All IVW-eligible overlapping ADD rows
 
-All same-direction ADD rows used for IVW comparison (`meta_add_df`), sorted by `META_P`.
+All overlapping ADD rows with **finite `BETA` and `SE` in both freezes** (`meta_add_df`), **IVW** applied **regardless of sign**; sorted by `META_P`. Use **`CONSISTENT_DIRECTION`**, **`HET_FLAG`**, and **`OPPOSITE_DIRECTION`** (in CSVs) for interpretation—not row drops before meta.
 **Display cap: first 100 rows shown in HTML (full table is still written to CSV outputs).**
 
 ```{r table-a, echo=FALSE}
 show_tbl(
   table_a %>%
-    select(GENE, MASK, THRESH, META_P, META_P_ADJ, PVAL_F2, PVAL_F3, HET_FLAG),
+    select(
+      GENE, MASK, THRESH, META_P, META_P_ADJ, PVAL_F2, PVAL_F3,
+      HET_FLAG, CONSISTENT_DIRECTION, OPPOSITE_DIRECTION, DOMINATED_BY_F3
+    ),
   n = 100
 )
 ```
 
-## B. Consistent same-direction ADD rows
+## B. Consistent same-direction overlapping ADD rows
 
-Subset of A with same direction and QC-style sanity filters (`reasonable_se`, `reasonable_beta`, `not_wild_diff`).
+Subset of Table **A** restricted to same-direction rows for interpretability; meta-analysis itself is performed on all IVW-eligible rows. Same subset also applies pragmatic stability filters (`reasonable_se`, `reasonable_beta`, `not_wild_diff`; see **5. Flags**).
 **Display cap: first 100 rows shown in HTML (full table is still written to CSV outputs).**
 
 ```{r table-b, echo=FALSE}
@@ -563,22 +667,24 @@ show_tbl(
 
 ## D. Discordant ADD rows
 
-**Columns:** **`PVAL_F2`**, **`PVAL_F3`** only — opposite-sign overlap rows are excluded from IVW meta, so there is no **`META_P`** / **`META_P_ADJ`** for these genes in this view.
+**Columns:** **`PVAL_F2`**, **`PVAL_F3`**, and (when the row is **IVW-eligible**) joined **`META_P`**, **`META_P_ADJ`**, **`HET_FLAG`**, **`WEIGHT_RATIO`**. Opposite-sign **`META_P`** is a **pooled** IVW statistic for transparency; **do not** read it as cross-freeze directional agreement.
 
-ADD overlap rows with opposite beta signs between freezes (not used in same-direction IVW meta rows).
+ADD overlap rows with **opposite non-zero beta signs** between freezes (quarantined for interpretation; full overlap IVW lives in **Table A** / **`meta_ADD.csv`**).
 **Display cap: first 100 rows shown in HTML (full table is still written to CSV outputs).**
 
 ```{r table-d, echo=FALSE}
 show_tbl(
   table_d %>%
-    select(GENE, MASK, THRESH, PVAL_F2, PVAL_F3),
+    select(
+      GENE, MASK, THRESH, PVAL_F2, PVAL_F3, META_P, META_P_ADJ, HET_FLAG, WEIGHT_RATIO
+    ),
   n = 100
 )
 ```
 
-## Cross-freeze comparison shortlist (ADD, same-direction)
+## Cross-freeze comparison shortlist (ADD, IVW pool)
 
-Sorted by `META_P`. For exploratory triage; full columns in CSV.
+Sorted by `META_P` over **all IVW-eligible overlap** rows. For exploratory triage; full columns in CSV.
 **Display cap: first 100 rows shown in HTML (full table is still written to CSV outputs).**
 
 ```{r comparison-table, echo=FALSE}
@@ -667,19 +773,15 @@ knitr::kable(
 
 Interpretation (exploratory):
 
-Differences between Freeze 2 and Freeze 3 for CHEK2 may reflect:
+For **CHEK2**, cross-freeze differences are **most plausibly driven by power imbalance and carrier sparsity in Freeze 2**, consistent with the observed case count asymmetry between freezes. **Variant-level callability / missingness** should be assessed in a **separate** variant workflow; **this gene-level notebook does not adjudicate CHEK2 as a missingness artifact.**
 
-- differences in carrier counts  
-- variant missingness or capture differences  
-- power differences between freezes  
-
-This report does not resolve these causes; it identifies candidates for variant-level follow-up.
+This report does not resolve mechanistic causes; it highlights where freezes diverge for targeted follow-up.
 
 ---
 
 # 8. Plots
 
-Same-direction ADD rows as **6. Results**: *x*/*y* use **`PVAL_F2`** / **`PVAL_F3`** (and **`META_P`** for volcano *y* via **`LPM`** = −log10 **`META_P`**, capped).
+ADD **IVW pool** rows as in **6. Results**: *x*/*y* use **`PVAL_F2`** / **`PVAL_F3`** (and **`META_P`** for volcano *y* via **`LPM`** = −log10 **`META_P`**, capped).
 
 ```{r plot-data, echo=FALSE}
 plot_df <- meta_add_df %>%
@@ -688,6 +790,36 @@ plot_df <- meta_add_df %>%
     LP3 = pmin(-log10(pmax(PVAL_F3, .Machine$double.xmin)), 50),
     LPM = pmin(-log10(pmax(META_P, .Machine$double.xmin)), 50)
   )
+```
+
+```{r plot-freeze-asymmetry, echo=FALSE, fig.height=4, fig.cap="ADD: how IVW weight is split between freezes (WEIGHT_RATIO = precision_F3 / (precision_F2 + precision_F3)). Values near 1 mean the combined estimate is dominated by Freeze 3."}
+ggplot(
+  dplyr::filter(meta_add_df, is.finite(WEIGHT_RATIO)),
+  aes(x = WEIGHT_RATIO)
+) +
+  geom_histogram(bins = 40, fill = "gray45", color = "white") +
+  labs(x = "WEIGHT_RATIO (F3 share of IVW precision)", y = "Count")
+```
+
+```{r plot-freeze-asymmetry-bar, echo=FALSE, fig.height=3.5, fig.cap="ADD: IVW-eligible overlap (all directions) vs opposite-sign discordant overlap (Table D; META columns joined when IVW-eligible)."}
+n_discord_merged <- merged_add_all %>%
+  dplyr::filter(
+    is.finite(BETA_F2), is.finite(BETA_F3),
+    sign(BETA_F2) != 0, sign(BETA_F3) != 0,
+    sign(BETA_F2) != sign(BETA_F3)
+  ) %>%
+  nrow()
+asym_counts <- tibble::tibble(
+  category = c(
+    "IVW-eligible overlap (meta_add_df, all signs)",
+    "Opposite-sign discordant (merged ADD, Table D)"
+  ),
+  n = c(nrow(meta_add_df), n_discord_merged)
+)
+ggplot(asym_counts, aes(x = category, y = n)) +
+  geom_col(width = 0.55, fill = "gray50") +
+  labs(x = NULL, y = "Rows") +
+  theme(axis.text.x = element_text(angle = 12, hjust = 1))
 ```
 
 ## P-values (F2 vs F3)
@@ -788,15 +920,17 @@ show_tbl(
 )
 ```
 
-**Priority (ADD, exploratory):** **High** — strong `META_P`, same non-zero direction, reasonable SE/beta, no `HET_FLAG`, ≥1 freeze nominal at `p_support`. **Medium** — stronger evidence in one freeze, weaker in the other. **Review** — remainder. **Discordant** — opposite-sign betas (Table D / CSV; no IVW *p*).
+**Priority (ADD, exploratory):** **High** — strong `META_P`, **`CONSISTENT_DIRECTION`**, stability guards (`reasonable_se`, `reasonable_beta`, `not_wild_diff`), **`!HET_FLAG`**, ≥1 freeze nominal at `p_support`, **not** `DOMINATED_BY_F3` (IVW not almost entirely F3 precision). **Medium** — consistent direction, asymmetric per-freeze strength. **F3-dominated** — `WEIGHT_RATIO` \> 0.8: **F3-driven IVW with limited cross-freeze precision support**; **do not** treat as fully replicated. **Review** — heterogeneous consistent effects (`HET_FLAG`) or other remainder. **Discordant** — **`OPPOSITE_DIRECTION`** (Table D / CSV; joined `META_P` is pooled only, not agreement).
 
 ---
 
 # 10. Notes
 
 - Per-freeze analyses are primary; this report is for **cross-freeze comparison** and triage, not replication claims.  
-- **IVW** here is a ranking aid, not a full joint model; **WEIGHT_RATIO** / **DOMINATED_BY_F3** flag F3-heavy influence.  
-- **SKAT/SKATO:** Fisher-combined *p*-values; non-directional. Treat **ADD-SKATO** freeze gaps as exploratory (see **`only_F*_SKATO.csv`**).  
+- **`META_P` (ADD)** — **IVW** on **all IVW-eligible overlap rows** (finite `BETA`/`SE`); **`META_P_ADJ`** is BH across that full pool. **Tier interpretation** with **`CONSISTENT_DIRECTION`**, **`HET_FLAG`**, **`OPPOSITE_DIRECTION`**, and **`DOMINATED_BY_F3`**; **opposite-sign rows** appear in **Table D** because the pooled estimate is **not** a directional-agreement summary. **`HET_FLAG`** reflects statistical inconsistency between freezes; in this dataset, heterogeneity may arise from a combination of power imbalance and residual capture differences rather than pure biological disagreement.  
+- **Absence of Freeze 2 support** for rare signals **often reflects limited case carriers / power**, not definitive non-replication.  
+- **`DOMINATED_BY_F3`** (`WEIGHT_RATIO` \> 0.8) indicates the IVW estimate is **effectively driven by Freeze 3** due to precision imbalance; these signals should be interpreted as **Freeze-3-driven** rather than cross-freeze replication.  
+- **SKAT/SKATO:** Fisher’s method is the **single** combined summary used here. It combines *p*-values only (no direction, no pooled effect size), so interpretation should always refer back to **`PVAL_F2`** and **`PVAL_F3`**. **High** SKAT/SKATO rows require at least weak support in both freezes (**`BOTH_FREEZE_WEAK`**) to avoid treating a one-freeze-only result as a cross-freeze signal. Treat **ADD-SKATO** freeze gaps as exploratory (see **`only_F*_SKATO.csv`**).  
 - **Gene-level only** — variant missingness and carrier-level checks belong in a separate variant follow-up workflow.
 
 ---
@@ -823,7 +957,7 @@ add_prio <- file.path(params$out_dir, "meta_ADD_freeze_consistent_priority.csv")
 add_short <- file.path(params$out_dir, "meta_ADD_priority_shortlist.csv")
 add_cmp <- file.path(params$out_dir, "meta_ADD_comparison_shortlist.csv")
 genes_followup_fp <- file.path(params$out_dir, "genes_for_followup.csv")
-final_val_fp <- file.path(params$out_dir, "final_gene_list_for_validation.csv")
+final_val_fp <- file.path(params$out_dir, "freeze_consistent_genes_for_followup_validation.csv")
 variant_targets_fp <- file.path(params$out_dir, "variant_followup_targets.csv")
 add_disc <- file.path(params$out_dir, "meta_ADD_sign_discordant.csv")
 skat_out <- file.path(params$out_dir, "meta_SKAT.csv")
@@ -848,10 +982,10 @@ readr::write_csv(table_b_export %>% select(-any_of(drop_internal)), add_prio)
 readr::write_csv(table_short_export %>% select(-any_of(drop_internal)), add_short)
 readr::write_csv(comparison_tbl, add_cmp)
 
-final_gene_list_for_validation <- table_b_export %>%
+freeze_consistent_genes_for_followup_validation <- table_b_export %>%
   dplyr::filter(META_P_ADJ <= 0.05) %>%
   dplyr::arrange(META_P)
-readr::write_csv(final_gene_list_for_validation, final_val_fp)
+readr::write_csv(freeze_consistent_genes_for_followup_validation, final_val_fp)
 
 p_str_fu <- as.numeric(params$p_strong)
 psup_fu <- as.numeric(params$p_support)
@@ -943,19 +1077,19 @@ message("Wrote: ", skato_out)
 message("Wrote: ", skato_short_out)
 ```
 
-**meta_ADD.csv** — full IVW + flags (same-direction rows only).  
-**meta_ADD_comparison_shortlist.csv** — compact same-direction ADD rows, sorted **META_P** (exploratory comparison).  
-**final_gene_list_for_validation.csv** — Table **B** rows with **META_P_ADJ** ≤ 0.05 (curated handoff list).  
+**meta_ADD.csv** — full IVW + flags on **all IVW-eligible overlap** rows (finite `BETA`/`SE`).  
+**meta_ADD_comparison_shortlist.csv** — compact IVW-pool ADD rows, sorted **META_P** (exploratory comparison).  
+**freeze_consistent_genes_for_followup_validation.csv** — Table **B** rows with **META_P_ADJ** ≤ 0.05 (handoff list for follow-up validation; name avoids implying a single “final” causal list).  
 **variant_followup_targets.csv** — union of **High/Medium** priority, **Table C** (F3-driven), and **discordant** rows, with **`handoff_tier`** labels.  
-**genes_for_followup.csv** — **Diagnostic scan list** (F3 strong / F2 not nominal, or discordant signs) — **not** a validation-ready shortlist; use **`final_gene_list_for_validation.csv`** for that.  
-**meta_ADD_sign_discordant.csv** — opposite-sign overlap (no IVW `META_P`).  
+**genes_for_followup.csv** — **Diagnostic scan list** (F3 strong / F2 not nominal, or discordant signs) — **not** a validation-ready shortlist; use **`freeze_consistent_genes_for_followup_validation.csv`** for that.  
+**meta_ADD_sign_discordant.csv** — opposite-sign overlap; **`META_P`** / **`META_P_ADJ`** joined when IVW-eligible (pooled IVW, not consistency).  
 **meta_ADD_freeze_consistent_priority.csv** — Table B–style subset.  
 **meta_ADD_priority_shortlist.csv** — **High** + **Medium** only.  
-**meta_SKAT.csv** / **meta_SKATO.csv** / **meta_SKATO_shortlist.csv** — Fisher + FDR; SKATO priority High / Medium / Review.  
+**meta_SKAT.csv** / **meta_SKATO.csv** / **meta_SKATO_shortlist.csv** — per-freeze *p*-values plus the **single** Fisher-combined summary used in this notebook; **High** = **`FISHER_P_ADJ` ≤ 0.05** and **`BOTH_FREEZE_WEAK`**.  
 **only_F2.csv**, **only_F3.csv**; **only_F2_SKATO.csv**, **only_F3_SKATO.csv** (ADD-SKATO-only unmatched).  
 **gene_regenie_standardized_F2_F3_long.csv** — long snapshot. Directory: `r params$out_dir`.
 
-**Quick use:** Compare **`meta_ADD_comparison_shortlist.csv`**; full columns in **`meta_ADD.csv`**. Discordant **`meta_ADD_sign_discordant.csv`**. Diagnostic triage **`genes_for_followup.csv`**. SKAT/SKATO by **FISHER_P_ADJ**. **`THRESH`** stays character in downstream code.
+**Quick use:** Compare **`meta_ADD_comparison_shortlist.csv`**; full columns in **`meta_ADD.csv`**. Discordant **`meta_ADD_sign_discordant.csv`**. Diagnostic triage **`genes_for_followup.csv`**. SKAT/SKATO: **`FISHER_P`** / **`FISHER_P_ADJ`** (single Fisher summary) with **`PVAL_F2`** and **`PVAL_F3`**. **`THRESH`** stays character in downstream code.
 
 ---
 
