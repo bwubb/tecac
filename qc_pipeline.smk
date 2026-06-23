@@ -25,7 +25,7 @@ wildcard_constraints:
 rule qc_report:
     input:
         f"exwas_qc_report.{DATE}.html",
-        f"data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.{DATE}.html",
+        #f"data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.{DATE}.html",
 #rename this rv-wc html and drop freeze2,3 shit from the file names.
 
 rule finalize:

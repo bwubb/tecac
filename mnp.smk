@@ -13,6 +13,19 @@ import datetime
 
 DATE=datetime.date.today().strftime('%Y%m%d')
 
+# Read-check CSV for filter_mnp_pass_by_read_check. Optional sidestep: set input.mnp in config
+# to an existing results file; otherwise use output from check_mnp_reads.
+MNP_READ_CHECK=config.get("input",{}).get("mnp") or "data/mnp/mnp_read_check.results.mapq20.csv"
+# minimal: one read-check per MNP (greedy BAM set); pair-level filter.
+# all_cases: read-check every (MNP, case) PASS row; per-sample filter.
+MNP_READ_CHECK_MODE=config.get("mnp",{}).get("read_check_mode","minimal")
+MNP_ALL_CARRIERS="--all-carriers" if MNP_READ_CHECK_MODE=="all_cases" else ""
+MNP_FILTER_PER_SAMPLE="--per-sample" if MNP_READ_CHECK_MODE=="all_cases" else ""
+MNP_CASE_LIST=config.get("input",{}).get("cases","case.list")
+# set_cover: one BAM per MNP (minimal); all_cases: every case carrier per MNP (default)
+MNP_READ_CHECK_MODE=config.get("mnp",{}).get("read_check_mode","all_cases")
+MNP_PAIR_RULE=config.get("mnp",{}).get("pair_rule","any")
+
 
 # Target: same outputs as mnp for GT/VEP handoff, but the DAG does not require assignments/samples.
 # Put read-check outputs in place yourself (same paths as rule check_mnp_reads) so that rule is skipped.
@@ -22,6 +35,15 @@ rule mnp_gt_for_downstream:
         bcf=expand("data/mnp/chr{CHR}.mnp.pass.gt.sorted.bcf",CHR=range(1,23)),
         vep_vcf=expand("data/mnp/chr{CHR}.mnp.pass.no_sample.sorted.vep.vcf",CHR=range(1,23)),
         vep_bcf=expand("data/mnp/chr{CHR}.mnp.pass.no_sample.sorted.vep.bcf",CHR=range(1,23))
+
+
+# Stop here before samtools read validation (check_mnp_reads).
+# Run: snakemake -s qc_pipeline.smk mnp_before_read_check --configfile config.yml
+rule mnp_before_read_check:
+    input:
+        assignments="data/mnp/mnp_read_check.assignments.tsv",
+        samples="data/mnp/mnp_read_check.samples.txt",
+        pass_files=expand("data/mnp/chr{CHR}.mnp_sample_info.PASS.txt",CHR=range(1,23)),
 
 
 # Target: full path including choose_mnp_read_check_samples, check_mnp_reads, validation metrics.
@@ -85,7 +107,7 @@ rule test_mnp_sample_info:
         pass_out="data/mnp/chr{CHR}.mnp_sample_info.PASS.txt",
         fail_out="data/mnp/chr{CHR}.mnp_sample_info.FAIL.txt"
     params:
-        sample_list="case.list"
+        sample_list=MNP_CASE_LIST
     shell:
         "python test_mnp_sample_info.py -p {input.pairs} -i {input.sample_info} -o {output.pass_out} -f {output.fail_out} --sample-list {params.sample_list} --min-samples 1"
 
@@ -96,15 +118,21 @@ rule choose_mnp_read_check_samples:
     output:
         assignments="data/mnp/mnp_read_check.assignments.tsv",
         samples="data/mnp/mnp_read_check.samples.txt",
+    params:
+        case_list=MNP_CASE_LIST,
+        mode=MNP_READ_CHECK_MODE,
+        # set_cover (minimal BAMs): --mode set_cover  (drop --case-list)
     shell:
-        "python choose_mnp_read_check_samples.py {input.pass_files} -o {output.assignments} -s {output.samples}"
+        "python choose_mnp_read_check_samples.py {input.pass_files} "
+        "-o {output.assignments} -s {output.samples} "
+        "--mode {params.mode} --case-list {params.case_list}"
 
 rule check_mnp_reads:
     input:
         assignments="data/mnp/mnp_read_check.assignments.tsv",
         samples="data/mnp/mnp_read_check.samples.txt",
     output:
-        #csv="data/mnp/mnp_read_check.results.mapq20.csv",
+        csv="data/mnp/mnp_read_check.results.mapq20.csv",
         read_details="data/mnp/mnp_read_check.read_details.mapq20.tsv"
     params:
         bam_table=config.get("mnp",{}).get("bam_table","mnp_bam.table"),
@@ -119,13 +147,12 @@ rule check_mnp_reads:
         "-o {output.csv} "
         "--read-details-tsv {output.read_details}"
 
-## NOTE: this is a sidestep to get the read-check results from the config file.
-## Didnt feel like figureing out how to make a split branch for this. 
 rule filter_mnp_pass_by_read_check:
     input:
         pass_in="data/mnp/chr{CHR}.mnp_sample_info.PASS.txt",
-        read_check=config["input"]["mnp"],
-        #replace with "data/mnp/mnp_read_check.results.mapq20.csv" to run it again.
+        read_check=MNP_READ_CHECK,
+    params:
+        pair_rule=MNP_PAIR_RULE,
     output:
         pass_out="data/mnp/chr{CHR}.mnp_sample_info.read_check_filtered.PASS.txt",
         ids_out="data/mnp/chr{CHR}.mnp_sample_info.read_check_filtered.PASS.id"
@@ -134,7 +161,8 @@ rule filter_mnp_pass_by_read_check:
         "-r {input.read_check} "
         "-i {input.pass_in} "
         "-o {output.pass_out} "
-        "--ids-out {output.ids_out}"
+        "--ids-out {output.ids_out} "
+        "--pair-rule {params.pair_rule}"
 
 rule plan_mnp_gt:
     input:

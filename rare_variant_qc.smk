@@ -23,7 +23,8 @@ rule rare_variant_qc_extract_per_chr:
     input:
         bcf="data/bcftools/chr{CHR}.site-qc.het_miss.mnp.gt.bcf",
         samples="data/qc/passing_samples.txt",
-        covariates=config.get("input",{}).get("covariates","")
+    params:
+        covariates=config.get("input",{}).get("covariates","covariates.txt")
     output:
         matrix="data/qc/rare_variant/chr{CHR}.controls.freeze_gt.matrix.tsv",
         sample_order="data/qc/rare_variant/chr{CHR}.controls.sample_order.txt",
@@ -32,7 +33,7 @@ rule rare_variant_qc_extract_per_chr:
         """
         mkdir -p data/qc/rare_variant
         # covariates: FID IID FREEZE STATUS; controls STATUS==1.passing_samples: IID per line OR FID IID;register both FID and IID for membership (match covariates IID col2).
-        awk 'BEGIN{{FS="[ \t]+";OFS="\\t"}} NR==FNR{{if(NR==1 && ((NF>=2 && $1 ~ /^#?FID$/ && $2 ~ /^#?IID$/) || (NF==1 && $1 ~ /^#?IID$/)))next;if(NF>=2){{pass[$1]=1;pass[$2]=1}}else if($1!="")pass[$1]=1;next}} FNR==1{{next}} {{gsub(/\\r/,"",$2);gsub(/\\r/,"",$3);gsub(/\\r/,"",$4);if(($2 in pass) && ($4=="1") && (($3=="2") || ($3=="3")))print $2,$3}}' {input.samples} {input.covariates} > {output.sample_freeze}
+        awk 'BEGIN{{FS="[ \t]+";OFS="\\t"}} NR==FNR{{if(NR==1 && ((NF>=2 && $1 ~ /^#?FID$/ && $2 ~ /^#?IID$/) || (NF==1 && $1 ~ /^#?IID$/)))next;if(NF>=2){{pass[$1]=1;pass[$2]=1}}else if($1!="")pass[$1]=1;next}} FNR==1{{next}} {{gsub(/\\r/,"",$2);gsub(/\\r/,"",$3);gsub(/\\r/,"",$4);if(($2 in pass) && ($4=="1") && (($3=="2") || ($3=="3")))print $2,$3}}' {input.samples} {params.covariates} > {output.sample_freeze}
         test -s {output.sample_freeze}
         echo "Controls written: $(wc -l < {output.sample_freeze})"
         echo "Freeze 2 controls: $(awk 'BEGIN{{FS=\"\\t\"}} $2==\"2\"{{c++}} END{{print c+0}}' {output.sample_freeze})"
