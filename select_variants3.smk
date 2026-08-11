@@ -106,23 +106,35 @@ rule infer_sex_from_het:
         sex_file="data/plink/chrX.sex_update.txt"
     shell:
         """
-        awk 'NR>1 {{
-            f = $3 / $5;
-            if (f >= 0.2 && f <= 0.8) {{
-                print $1, $2 > "{output.exclusions}";
-            }}
-        }}' {input}
-        
-        # Create report
+        mkdir -p data/qc/exclusions data/qc/reports data/plink
+        : > {output.exclusions}
+
+        # PLINK2 default .het cols (with FID): #FID IID O(HOM) E(HOM) OBS_CT F
+        # F_sex = O(HOM)/OBS_CT for chrX sex inference (report Status = MALE/FEMALE/AMBIGUOUS).
+        # Females are NOT auto-removed; only AMBIGUOUS are written to sexcheck_fail.
         echo "Sample_ID O_HOM E_HOM OBS_CT F_inbreed F_sex Status" > {output.report}
         awk 'NR>1 {{
-            f_sex = $3 / $5;
-            status = (f_sex > 0.8) ? "MALE" : (f_sex < 0.2) ? "FEMALE" : "AMBIGUOUS";
-            print $1, $3, $4, $5, $6, f_sex, status
+            oh=$3; eh=$4; obs=$5; f_inbreed=$6;
+            if (obs+0 == 0) {{
+                status="AMBIGUOUS"; f_sex="NA";
+                print $1, $2 >> "{output.exclusions}";
+            }} else {{
+                f_sex = oh / obs;
+                if (f_sex > 0.8) status="MALE";
+                else if (f_sex < 0.2) status="FEMALE";
+                else {{
+                    status="AMBIGUOUS";
+                    print $1, $2 >> "{output.exclusions}";
+                }}
+            }}
+            print $1, oh, eh, obs, f_inbreed, f_sex, status
         }}' {input} >> {output.report}
-        
-        # Touch exclusions file if empty (in case no problems found)
-        touch {output.exclusions}
+
+        n=$(awk 'NR>1' {output.report} | wc -l)
+        if [ "$n" -eq 0 ]; then
+            echo "ERROR: sex_inference.txt has header only (0 samples). Check {input}." >&2
+            exit 1
+        fi
 
         # Create sex update file (only for non-ambiguous samples)
         # Format: #FID IID SEX (plink2 requires FID for --update-sex)

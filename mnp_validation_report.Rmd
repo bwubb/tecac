@@ -1,0 +1,196 @@
+---
+title: "MNP Carrier & Validation Report"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+params:
+  stats_tsv: "data/mnp/mnp_carrier_stats.tsv"
+  aaf_cutoff: 0.001
+  aaf_bins: "0.0001,0.001,0.01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.width = 9, fig.height = 5)
+library(tidyverse)
+library(scales)
+library(knitr)
+
+aaf_bins <- as.numeric(strsplit(params$aaf_bins, ",")[[1]])
+cutoff <- as.numeric(params$aaf_cutoff)
+```
+
+This report describes the candidate MNPs found in cases, how many cases and controls
+*possibly* carry each (VAF-cis carriers, before CRAM read-check), where they sit relative
+to the REGENIE `--aaf-bins`, and what the read-check validation showed. It justifies the
+cohort-AAF cutoff below which we create + validate MNP records (full case **and** control
+read-check, GT rewritten only for `Strong_Cis` carriers); everything above the cutoff is
+left as separate SNVs for all samples.
+
+```{r load}
+num <- function(x) suppressWarnings(as.numeric(ifelse(x %in% c(".", "inf", "Inf", ""), NA, x)))
+
+d <- read_tsv(params$stats_tsv, show_col_types = FALSE, col_types = cols(.default = col_character())) %>%
+  mutate(
+    across(c(n_case, n_control, n_other, carrier_total), as.integer),
+    across(any_of(c("case_freq","control_freq","cohort_aaf","fisher_p","odds_ratio",
+                    "case_cis_frac","ctrl_cis_frac")), num),
+    across(any_of(c("case_checked","case_strong","ctrl_checked","ctrl_strong")), as.integer),
+    target = cohort_aaf <= cutoff
+  )
+has_validation <- "case_cis_frac" %in% names(d)
+n_mnp <- nrow(d)
+```
+
+- **Total candidate case MNPs:** `r n_mnp`
+- **Cohort-AAF cutoff for MNP creation:** `r format(cutoff, scientific = TRUE)`
+- **MNPs at/below cutoff (treated as MNPs):** `r sum(d$target)`
+- **MNPs above cutoff (kept as separate SNVs):** `r sum(!d$target)`
+
+## 1. Carrier-count distribution (the bimodality)
+
+Most MNPs are carried by very few people; a long tail is carried by hundreds–thousands of
+controls (common germline haplotypes). The cutoff lands in the gap.
+
+```{r dist-control}
+ggplot(d, aes(x = pmax(n_control, 0.5))) +
+  geom_histogram(bins = 60, fill = "steelblue", color = "white") +
+  scale_x_log10(labels = comma, breaks = c(1,2,5,10,20,50,100,500,2000,8000)) +
+  labs(x = "control carriers per MNP (log scale)", y = "MNPs",
+       title = "Control carriers per MNP") +
+  theme_minimal()
+```
+
+## 2. Case vs control carrier frequency, with aaf-bins
+
+Each point is an MNP. Diagonal = equal case/control carrier frequency. Dashed lines mark
+the REGENIE allele-frequency bins (carrier ≈ 2×AAF). Points left of the leftmost line are
+rare enough to be in the ultra-rare/rare masks.
+
+```{r scatter}
+bin_carrier <- aaf_bins * 2  # carrier freq approx
+ggplot(d, aes(x = pmax(control_freq, 1e-5), y = pmax(case_freq, 1e-5), color = target)) +
+  geom_point(alpha = 0.5, size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "grey50") +
+  geom_vline(xintercept = bin_carrier, linetype = "dashed", color = "firebrick") +
+  scale_x_log10(labels = label_number(accuracy = 1e-5)) +
+  scale_y_log10(labels = label_number(accuracy = 1e-5)) +
+  scale_color_manual(values = c(`TRUE` = "firebrick", `FALSE` = "grey60"),
+                     labels = c(`TRUE` = paste0("AAF <= ", cutoff), `FALSE` = "above cutoff"),
+                     name = NULL) +
+  labs(x = "control carrier frequency", y = "case carrier frequency",
+       title = "Case vs control carrier frequency (dashed = aaf-bins)") +
+  theme_minimal()
+```
+
+## 3. Cohort AAF and the bins
+
+```{r aaf-bins}
+bin_tbl <- tibble(bin = aaf_bins) %>%
+  mutate(n_mnps = map_int(bin, ~ sum(d$cohort_aaf <= .x, na.rm = TRUE))) %>%
+  add_row(bin = Inf, n_mnps = sum(d$cohort_aaf > max(aaf_bins), na.rm = TRUE))
+kable(bin_tbl %>% mutate(bin = ifelse(is.infinite(bin), paste0("> ", max(aaf_bins)), paste0("<= ", bin))),
+      col.names = c("cohort AAF", "MNPs"), caption = "MNPs by cohort AAF bin (cumulative for finite rows)")
+
+ggplot(d, aes(x = pmax(cohort_aaf, 1e-6))) +
+  geom_histogram(bins = 60, fill = "darkorange", color = "white") +
+  geom_vline(xintercept = cutoff, color = "firebrick", linewidth = 1) +
+  scale_x_log10(labels = label_number(accuracy = 1e-6)) +
+  annotate("text", x = cutoff, y = Inf, label = paste0("cutoff ", cutoff),
+           vjust = 2, hjust = -0.05, color = "firebrick") +
+  labs(x = "cohort AAF (log scale)", y = "MNPs", title = "Cohort AAF distribution") +
+  theme_minimal()
+```
+
+## 4. What the read-check validation showed
+
+`r if (!has_validation) "No validation columns in the stats file (re-run mnp_carrier_stats.py with --read-check)." else ""`
+
+```{r validation, eval=has_validation}
+v <- d %>% filter(!is.na(case_cis_frac))
+```
+
+### Case cis-fraction vs cohort AAF
+
+If validation confirmed the MNP, `case_cis_frac` (fraction of checked case carriers that
+are `Strong_Cis`) is high. This shows whether co-occurrence reflects true cis haplotypes
+across the frequency range.
+
+```{r val-case, eval=has_validation}
+ggplot(v, aes(x = pmax(cohort_aaf, 1e-6), y = case_cis_frac, size = case_checked, color = target)) +
+  geom_point(alpha = 0.5) +
+  geom_vline(xintercept = cutoff, color = "firebrick", linetype = "dashed") +
+  scale_x_log10(labels = label_number(accuracy = 1e-6)) +
+  scale_color_manual(values = c(`TRUE` = "firebrick", `FALSE` = "grey60"), name = NULL,
+                     labels = c(`TRUE` = "target", `FALSE` = "above cutoff")) +
+  labs(x = "cohort AAF (log scale)", y = "case cis-fraction (Strong_Cis / checked)",
+       size = "cases checked", title = "Case validation vs cohort AAF") +
+  theme_minimal()
+```
+
+### Case vs control cis-fraction (target MNPs)
+
+For the MNPs we validated on both sides, do cases and controls agree on cis evidence?
+Points off the diagonal are MNPs where one group is more cis than the other.
+
+```{r val-casectrl, eval=has_validation}
+vc <- v %>% filter(target, !is.na(ctrl_cis_frac))
+if (nrow(vc) > 0) {
+  ggplot(vc, aes(x = ctrl_cis_frac, y = case_cis_frac, size = ctrl_checked)) +
+    geom_point(alpha = 0.5, color = "steelblue") +
+    geom_abline(slope = 1, intercept = 0, color = "grey50") +
+    labs(x = "control cis-fraction", y = "case cis-fraction",
+         size = "controls checked", title = "Case vs control cis-fraction (target MNPs)") +
+    theme_minimal()
+} else {
+  "No target MNPs with both case and control validation."
+}
+```
+
+### Validation impact: carriers removed
+
+How many "possible" carriers the read-check reclassified as not-cis (trans), i.e. would have
+been false MNP carriers without validation.
+
+```{r val-impact, eval=has_validation}
+impact <- v %>% summarise(
+  case_checked = sum(case_checked, na.rm = TRUE),
+  case_strong  = sum(case_strong, na.rm = TRUE),
+  ctrl_checked = sum(ctrl_checked, na.rm = TRUE),
+  ctrl_strong  = sum(ctrl_strong, na.rm = TRUE)
+) %>% mutate(
+  case_removed_pct = round(100 * (1 - case_strong / pmax(case_checked, 1)), 1),
+  ctrl_removed_pct = round(100 * (1 - ctrl_strong / pmax(ctrl_checked, 1)), 1)
+)
+kable(impact, caption = "Read-check validation totals (strong = confirmed cis carriers)")
+```
+
+## 5. Download cost vs cutoff
+
+Target MNPs and an upper bound on control read-checks (sum of control carriers; the
+**deduped** unique-CRAM count is reported by `mnp_carrier_stats.py`'s targeting table).
+
+```{r cost}
+cost <- tibble(cut = sort(unique(c(aaf_bins, cutoff)))) %>%
+  mutate(
+    target_mnps = map_int(cut, ~ sum(d$cohort_aaf <= .x, na.rm = TRUE)),
+    control_checks_upper = map_int(cut, ~ sum(d$n_control[d$cohort_aaf <= .x], na.rm = TRUE))
+  )
+kable(cost, col.names = c("cohort AAF cutoff", "target MNPs", "control read-checks (upper bound)"),
+      caption = "Scope and cost by cutoff")
+```
+
+## 6. Top target MNPs by case enrichment
+
+```{r top-table}
+top <- d %>% filter(target) %>%
+  arrange(desc(n_case), cohort_aaf) %>%
+  select(any_of(c("mnp_id","n_case","n_control","cohort_aaf","aaf_bin",
+                  "case_or_ctrl_ratio","fisher_p","odds_ratio",
+                  "case_cis_frac","ctrl_cis_frac"))) %>%
+  head(30)
+kable(top, caption = "Top 30 target MNPs by case count")
+```

@@ -17,6 +17,8 @@ def get_args():
     p.add_argument('--controls',help='Controls list file (only needed if covariates has no STATUS)')
     p.add_argument('--covariates',help='Covariates file with FID IID STATUS; any other columns become extra covariates (e.g. FREEZE)')
     p.add_argument('--negative-control-blacklist',default='',help='Optional file with variant IDs (one per line) to exclude from synonymous negative-control mask')
+    p.add_argument('--gene-consequence-exclude',default='',
+                   help='TSV: GENE<TAB>CONSEQUENCE_SUBSTRING; drop matching sites from all masks')
     p.add_argument('-O','--output-prefix',default='',help='Output directory prefix')
     p.add_argument('--synonymous-out',default='',help='Write full M4 synonymous table to this path')
     return p.parse_args()
@@ -29,6 +31,45 @@ def is_synonymous_consequence(value):
     if not text:
         return False
     return 'synonymous_variant' in text
+
+
+def load_gene_consequence_exclude(path):
+    # rules: list of (gene_upper, consequence_substring_lower)
+    rules=[]
+    if not path:
+        return rules
+    if not os.path.exists(path):
+        print(f'Warning: gene-consequence exclude not found: {path} (continuing without)')
+        return rules
+    with open(path) as f:
+        for line in f:
+            line=line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts=line.split('\t')
+            if len(parts)<2:
+                parts=line.split()
+            if len(parts)<2:
+                print(f'Warning: skip bad exclude rule: {line}')
+                continue
+            gene=parts[0].strip().upper()
+            cons=parts[1].strip().lower()
+            if gene and cons:
+                rules.append((gene,cons))
+    return rules
+
+
+def matches_gene_consequence_exclude(gene,consequence,rules):
+    if not rules:
+        return False
+    g=str(gene).strip().upper()
+    c=str(consequence).strip().lower() if pd.notna(consequence) else ''
+    if not g or not c:
+        return False
+    for gene_u,cons_sub in rules:
+        if g==gene_u and cons_sub in c:
+            return True
+    return False
 
 
 def load_ancestry_table(path,dm_count,ancestry_columns):
@@ -118,6 +159,25 @@ def main():
     all_variants=all_variants[(all_variants['ID']!='') & (all_variants['Gene']!='')]
     all_variants=all_variants.drop_duplicates(subset=['ID','Gene'])
     all_variants['Variant.LoF_level']=pd.to_numeric(all_variants['Variant.LoF_level'],errors='coerce')
+
+    exclude_rules=load_gene_consequence_exclude(args.gene_consequence_exclude)
+    if exclude_rules:
+        print(f'Gene×consequence exclude rules: {len(exclude_rules)}')
+        for g,c in exclude_rules:
+            print(f'  {g} + {c}')
+        hit=all_variants.apply(
+            lambda r:matches_gene_consequence_exclude(r['Gene'],r['Variant.Consequence'],exclude_rules),
+            axis=1)
+        excluded=all_variants.loc[hit].copy()
+        all_variants=all_variants.loc[~hit].copy()
+        excl_fp=f'{prefix}mask_gene_consequence_excluded.csv'
+        excl_dir=os.path.dirname(excl_fp)
+        if excl_dir:
+            os.makedirs(excl_dir,exist_ok=True)
+        excluded.to_csv(excl_fp,index=False,quoting=csv.QUOTE_NONNUMERIC)
+        print(f'Excluded {len(excluded)} gene×consequence sites from all masks; wrote {excl_fp}')
+    else:
+        print('No gene×consequence exclude rules applied')
 
     pathogenic_df=all_variants[all_variants['Variant.LoF_level']==1][['ID','Gene']].drop_duplicates()
     vus_df=all_variants[all_variants['Variant.LoF_level']==2][['ID','Gene']].drop_duplicates()

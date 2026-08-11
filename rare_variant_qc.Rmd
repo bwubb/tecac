@@ -1,5 +1,5 @@
 ---
-title: "Rare Variant QC by Freeze (controls only)"
+title: "Rare Variant QC by Freeze (controls only, pairwise)"
 date: "`r format(Sys.Date(), '%Y-%m-%d')`"
 output:
   html_document:
@@ -7,20 +7,22 @@ output:
     toc_float: true
 ---
 
-This report performs **freeze-bias QC for rare variants in controls only**.
+This report performs **freeze-bias QC for rare variants in controls only**, comparing
+**all freezes pairwise** (a variant is flagged if any freeze pair trips a threshold).
 
 Why this is needed:
-- We want to separate technical freeze effects from true disease signal.
-- If callability differs by freeze (for example one freeze has more missing genotypes), a variant can look associated downstream for technical reasons.
+- Separate technical freeze/batch effects from true disease signal.
+- If callability differs by freeze (e.g. one freeze has more missing genotypes), a variant
+  can look associated downstream for technical reasons.
 - Controls-only comparison avoids mixing real case enrichment into the batch check.
 
-What this report tests per variant:
-- **Differential missingness by freeze** (Freeze 2 vs Freeze 3, Fisher's exact test plus absolute rate differences).
-- **Differential carrier rate by freeze** among called controls (Fisher's exact test plus absolute carrier-rate differences).
+What this report tests per variant (across every freeze pair present):
+- **Differential missingness by freeze** (Fisher's exact + absolute rate differences).
+- **Differential carrier rate by freeze** among called controls (Fisher's exact + absolute differences).
 
-How to interpret flags:
-- Treat this as a screening layer, not automatic exclusion by p-value alone.
-- Prioritize variants with meaningful effect size differences (not just tiny p-values), especially indels and variants in key genes.
+The flagged list (`rare_variant_exclusions.txt`) is **built but not necessarily applied** — see
+`rare_variant_qc.apply_exclusions` in config. Treat flags as a screening layer, not automatic
+exclusion by p-value alone.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo=FALSE,warning=FALSE,message=FALSE)
@@ -33,8 +35,8 @@ library(knitr)
 ```{r files}
 base_dir<-"data/qc/rare_variant"
 chr_files<-list.files(base_dir,pattern="^chr[0-9]+\\.rv-qc\\.tsv$",full.names=TRUE)
-out_all<-file.path(base_dir,"rv-qc.freeze2_vs_freeze3.all.tsv")
-out_flagged<-file.path(base_dir,"rv-qc.freeze2_vs_freeze3.flagged.tsv")
+out_all<-file.path(base_dir,"rv-qc.freeze_pairwise.all.tsv")
+out_flagged<-file.path(base_dir,"rv-qc.freeze_pairwise.flagged.tsv")
 pathogenic_vus_file<-"data/preprocess/pathogenic_vus.csv"
 
 if(length(chr_files)==0){
@@ -45,6 +47,8 @@ qc_all<-bind_rows(frames)
 qc_flagged<-qc_all %>% filter(flag==1)
 write_tsv(qc_all,out_all)
 write_tsv(qc_flagged,out_flagged)
+
+freezes_seen<-if("freezes" %in% names(qc_all)) sort(unique(qc_all$freezes)) else NA
 
 pv<-read_csv(pathogenic_vus_file,show_col_types=FALSE) %>%
   select(ID,Gene,Variant.LoF_level) %>%
@@ -60,6 +64,8 @@ qc_flagged_pv<-qc_flagged %>% inner_join(pv,by=c("variant_id"="ID"))
 
 ## Overview
 
+Freezes compared: **`r if(all(is.na(freezes_seen))) "unknown" else paste(freezes_seen, collapse=", ")`**
+
 ```{r overview}
 flagged_gene_n<-qc_flagged_pv %>%
   filter(!is.na(Gene),Gene!="") %>%
@@ -71,7 +77,7 @@ overview<-tibble(
     "Total variants tested",
     "Flagged variants",
     "Fraction flagged",
-    "Unique genes with flagged variants (from preprocess/pathogenic_vus.csv overlap)"
+    "Unique genes with flagged variants (pathogenic_vus.csv overlap)"
   ),
   value=c(
     nrow(qc_all),
@@ -83,21 +89,15 @@ overview<-tibble(
 kable(overview)
 ```
 
-## Current Exclusion Logic and Cutoffs
+## Exclusion Logic and Cutoffs
 
-The exclusion list (`rare_variant_exclusions.txt`) is built from variants with `flag==1` in the per-chromosome QC output.  
-Current rule logic (from `rare_variant_qc.py` + `rare_variant_qc.smk`):
+`rare_variant_exclusions.txt` is built from variants with `flag==1`. Rule logic (pairwise; a
+variant trips if ANY freeze pair qualifies), from `rare_variant_qc.py` + `rare_variant_qc.smk`:
 
-- Missingness absolute difference: `abs(f2_missing_rate-f3_missing_rate)>0.03`
-- High missingness in either freeze: `max(f2_missing_rate,f3_missing_rate)>0.05`
-- Missingness Fisher test: `missing_fisher_p<1e-6`
-- Carrier Fisher test: `carrier_fisher_p<1e-4` **and** `abs(f2_carrier_rate_called-f3_carrier_rate_called)>=0.01` **and** `total_called_carriers>=3`
-
-Where to go deeper before/after exclusions:
-- Review top flagged variants by effect size (`abs_missing_rate_diff`,`abs_carrier_rate_diff`), not p-value alone.
-- Prioritize indels and variants in high-impact genes (e.g., CHEK2 and top burden drivers).
-- Spot-check flagged variants with read-level/coverage context when available.
-- Compare whether key burden signals persist with and without flagged variants.
+- Missingness absolute difference: `abs_missing_rate_diff > 0.03` (max over freeze pairs)
+- High missingness in any freeze: `max_missing_rate > 0.05`
+- Missingness Fisher test: `missing_fisher_p < 1e-6` (min over freeze pairs)
+- Carrier Fisher test: `carrier_fisher_p < 1e-4` **and** `abs_carrier_rate_diff >= 0.01` **and** `total_called_carriers >= 3`
 
 ## Flag Reasons
 
@@ -116,12 +116,8 @@ if(nrow(qc_flagged)==0){
 ## Variant Type Summary
 
 ```{r variant-type-summary}
-type_total<-qc_all %>%
-  group_by(variant_type) %>%
-  summarise(total_variants=n(),.groups='drop')
-type_flagged<-qc_flagged %>%
-  group_by(variant_type) %>%
-  summarise(flagged_variants=n(),.groups='drop')
+type_total<-qc_all %>% group_by(variant_type) %>% summarise(total_variants=n(),.groups='drop')
+type_flagged<-qc_flagged %>% group_by(variant_type) %>% summarise(flagged_variants=n(),.groups='drop')
 type_summary<-type_total %>%
   left_join(type_flagged,by="variant_type") %>%
   mutate(flagged_variants=ifelse(is.na(flagged_variants),0,flagged_variants))
@@ -168,20 +164,11 @@ if(nrow(qc_flagged)==0){
 } else {
   top_flagged<-qc_flagged %>%
     arrange(missing_fisher_p,carrier_fisher_p,desc(abs_missing_rate_diff),desc(abs_carrier_rate_diff)) %>%
-    select(
-      variant_id,
-      variant_type,
-      f2_missing_rate,
-      f3_missing_rate,
-      abs_missing_rate_diff,
-      missing_fisher_p,
-      f2_carrier_rate_called,
-      f3_carrier_rate_called,
-      abs_carrier_rate_diff,
-      carrier_fisher_p,
-      total_called_carriers,
-      flag_reasons
-    ) %>%
+    select(any_of(c(
+      "variant_id","variant_type","freezes",
+      "abs_missing_rate_diff","max_missing_rate","missing_fisher_p","missing_worst_pair",
+      "abs_carrier_rate_diff","carrier_fisher_p","carrier_worst_pair",
+      "total_called_carriers","flag_reasons"))) %>%
     head(100)
   kable(top_flagged)
 }
@@ -195,12 +182,10 @@ if(nrow(qc_all)==0){
 } else {
   top_missing<-qc_all %>%
     arrange(desc(abs_missing_rate_diff),missing_fisher_p) %>%
-    select(
-      variant_id,variant_type,
-      f2_n_total,f2_n_missing,f2_missing_rate,
-      f3_n_total,f3_n_missing,f3_missing_rate,
-      abs_missing_rate_diff,missing_fisher_p,flag,flag_reasons
-    ) %>%
+    select(any_of(c(
+      "variant_id","variant_type","freezes",
+      "total_missing","total_called","max_missing_rate",
+      "abs_missing_rate_diff","missing_fisher_p","missing_worst_pair","flag","flag_reasons"))) %>%
     head(50)
   kable(top_missing)
 }
@@ -214,12 +199,10 @@ if(nrow(qc_all)==0){
 } else {
   top_carrier<-qc_all %>%
     arrange(desc(abs_carrier_rate_diff),carrier_fisher_p) %>%
-    select(
-      variant_id,variant_type,
-      f2_n_called,f2_n_carrier,f2_carrier_rate_called,
-      f3_n_called,f3_n_carrier,f3_carrier_rate_called,
-      abs_carrier_rate_diff,carrier_fisher_p,total_called_carriers,flag,flag_reasons
-    ) %>%
+    select(any_of(c(
+      "variant_id","variant_type","freezes",
+      "total_called","total_called_carriers",
+      "abs_carrier_rate_diff","carrier_fisher_p","carrier_worst_pair","flag","flag_reasons"))) %>%
     head(50)
   kable(top_carrier)
 }
@@ -259,12 +242,11 @@ if(nrow(qc_flagged_pv)==0){
 chek2_tbl<-qc_all_pv %>%
   filter(Gene=="CHEK2") %>%
   arrange(missing_fisher_p,carrier_fisher_p) %>%
-  select(
-    variant_id,variant_set,variant_type,
-    f2_missing_rate,f3_missing_rate,abs_missing_rate_diff,missing_fisher_p,
-    f2_carrier_rate_called,f3_carrier_rate_called,abs_carrier_rate_diff,carrier_fisher_p,
-    total_called_carriers,flag,flag_reasons
-  )
+  select(any_of(c(
+    "variant_id","variant_set","variant_type","freezes",
+    "abs_missing_rate_diff","max_missing_rate","missing_fisher_p","missing_worst_pair",
+    "abs_carrier_rate_diff","carrier_fisher_p","carrier_worst_pair",
+    "total_called_carriers","flag","flag_reasons")))
 if(nrow(chek2_tbl)==0){
   cat("No CHEK2 variants from data/preprocess/pathogenic_vus.csv were found in QC output.")
 } else {

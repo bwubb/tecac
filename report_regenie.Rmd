@@ -5,8 +5,10 @@ output:
   html_document:
     theme: paper
     toc: true
-    toc_depth: 2
-    toc_float: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
     code_folding: hide
 date: "`r Sys.Date()`"
 params:
@@ -18,13 +20,35 @@ params:
 ---
 
 ```{=html}
+<style>
+/* Light section breathing room — keep TOC usable when scrolling masks */
+h2 { margin-top: 2.2rem; padding-top: 0.4rem; border-top: 1px solid #e5e5e5; }
+h3 { margin-top: 1.8rem; }
+h4 { margin-top: 1.4rem; }
+h5 { margin-top: 1.1rem; color: #444; }
+.regenie-jump {
+  border: 1px solid #ddd; border-left: 4px solid #2E86AB;
+  background: #f7fafc; padding: 10px 14px; margin: 0.8rem 0 1.4rem 0;
+  font-size: 0.95rem;
+}
+.regenie-jump a { margin-right: 0.85rem; white-space: nowrap; }
+.regenie-block-sep {
+  margin: 2rem 0 0.6rem 0; padding-top: 0.4rem;
+  border-top: 2px solid #d0d7de;
+}
+</style>
+```
+
+## Project: `r params$project_name`
+
+```{=html}
 <div style="border:1px solid #ccc; border-left:4px solid #2E86AB; padding:12px 14px; margin:1rem 0; background:#fafafa;">
 <strong>How to read this report</strong>
 <ul style="margin-bottom:0;">
 <li><strong>Burden-style interpretation</strong> (effect direction, OR, volcano, CHEK2, directional gene lists) uses <code>TEST == &quot;ADD&quot;</code> only.</li>
-<li>An <strong>all-tests</strong> export includes <code>ADD</code>, <code>ADD-SKAT</code>, <code>ADD-SKATO</code>, … for archive and downstream meta-analysis.</li>
-<li><strong>Gene-based FDR</strong> (<code>PVAL_ADJ</code>) is Benjamini–Hochberg across <em>all</em> gene-based rows (every TEST × gene × mask × threshold), not within each TEST.</li>
-<li><strong>SKAT / SKATO</strong> are summarized in <strong>Gene-based results</strong> (non-directional p-values; no BETA/OR interpretation).</li>
+<li><strong>FDR</strong> (<code>PVAL_ADJ</code>) is Benjamini–Hochberg <em>within family</em>: ADD alone; SKAT+SKATO together. Do not mix with the other family’s FDR.</li>
+<li><strong>SKAT / SKATO</strong> are non-directional (no risk/protective OR). Use the separate SKAT/SKATO export — not the ADD tables.</li>
+<li>Exports: all-tests archive, ADD-only, and SKAT/SKATO-only (no BETA/OR columns).</li>
 </ul>
 </div>
 ```
@@ -35,8 +59,10 @@ NOTES TO SELF:
 - M2 = VUS variants only (LoF level 2) 
 - M3 = pathogenic + VUS variants combined
 - M4 = synonymous negative-control variants (excluding LoF 1/2 and excluding blacklisted potential MNP-pair IDs)
+- Gene×consequence exclude (preprocess): CHEK2 missense_variant dropped from all masks (literature: CHEK2 missense not disease-contributing here)
 - ADD = additive burden test (BETA/SE/OR and directional interpretation apply here only)
-- ADD-SKAT / ADD-SKATO = variance-component tests (`TEST` in REGENIE; p-values preserved in full export; not interpreted via BETA/OR in this report)
+- ADD-SKAT / ADD-SKATO = variance-component tests (non-directional; separate export; no BETA/OR interpretation)
+- FDR (PVAL_ADJ): BH within ADD; separately BH within SKAT+SKATO combined
 - Exome-wide significance = p < 2.5e-6 (not GWAS 5e-8)
 - Lambda GC less interpretable in ExWAS due to sparse rare variants
 
@@ -70,6 +96,61 @@ library(DiagrammeR)
 
 # Set consistent theme
 theme_set(theme_minimal(base_size = 13))
+
+# Shared HTML table look (gene col bold; consequence headers readable)
+.fmt_consequence_label <- function(x) {
+  # variant-list display: keep compound terms readable
+  x <- as.character(x)
+  x <- gsub("&", " / ", x, fixed = TRUE)
+  x <- gsub("_", " ", x, fixed = TRUE)
+  x
+}
+.fmt_consequence_header <- function(x) {
+  # matrix column headers: single terms, spaces not underscores
+  x <- as.character(x)
+  x <- gsub("_", " ", x, fixed = TRUE)
+  x
+}
+
+.style_report_kable <- function(
+  k,
+  font_size = 12,
+  full_width = TRUE,
+  gene_col = 1L,
+  scroll_h = NULL,
+  header_wrap = FALSE
+) {
+  out <- kableExtra::kable_styling(
+    k,
+    full_width = full_width,
+    bootstrap_options = c("striped", "hover", "condensed"),
+    font_size = font_size
+  )
+  if (!is.null(gene_col) && length(gene_col) && gene_col[1] > 0) {
+    out <- kableExtra::column_spec(out, gene_col[1], bold = TRUE)
+  }
+  if (isTRUE(header_wrap)) {
+    out <- kableExtra::row_spec(
+      out, 0,
+      align = "c",
+      extra_css = paste(
+        "vertical-align: middle;",
+        "white-space: normal;",
+        "line-height: 1.25;",
+        "min-height: 4.2em;",
+        "max-width: 8.5em;",
+        "word-break: break-word;",
+        "hyphens: auto;",
+        "padding-top: 10px;",
+        "padding-bottom: 10px;"
+      )
+    )
+  }
+  if (!is.null(scroll_h)) {
+    out <- kableExtra::scroll_box(out, width = "100%", height = scroll_h)
+  }
+  out
+}
 ```
 
 ```{r load-data,echo=FALSE,message=FALSE,warning=FALSE}
@@ -112,15 +193,169 @@ single_variant <- bind_rows(single_variant_list) %>%
     }, character(1L))
   )
 
-# Load pre-filtered pathogenic/VUS annotations
+# Thin pathogenic_vus / synonymous (small extracts only — do not load full VEP or full mask stats here)
 pathogenic_vus_file <- paste0("data/final/", params$project_name, ".pathogenic_vus.csv")
-if(file.exists(pathogenic_vus_file)) {
-  pathogenic_annotations <- read_csv(pathogenic_vus_file, show_col_types = FALSE) %>%
-    select(ID, Gene, Variant.LoF_level, HGVSc, HGVSp)
+if (file.exists(pathogenic_vus_file)) {
+  pathogenic_annotations <- read_csv(pathogenic_vus_file, show_col_types = FALSE)
 } else {
-  warning("Pathogenic/VUS annotation file not found. Table will show basic variant info only.")
+  warning("Pathogenic/VUS annotation file not found.")
   pathogenic_annotations <- NULL
 }
+
+synonymous_file <- paste0("data/final/", params$project_name, ".synonymous.csv")
+if (file.exists(synonymous_file)) {
+  synonymous_annotations <- read_csv(synonymous_file, show_col_types = FALSE)
+} else {
+  synonymous_annotations <- NULL
+}
+
+# Full mask stats may be ~700k rows (all mask sites). Never load whole file — subset by ID later.
+.mask_stats_candidates <- c(
+  file.path("data/regenie", "mask_variant_stats.tsv"),
+  paste0("data/final/", params$project_name, ".mask_variant_stats.tsv")
+)
+.mask_stats_path <- .mask_stats_candidates[file.exists(.mask_stats_candidates)][1]
+if (is.na(.mask_stats_path)) .mask_stats_path <- ""
+if (nzchar(.mask_stats_path)) {
+  message("Mask variant stats available (subset-on-demand): ", .mask_stats_path)
+}
+
+# Pull only needed ID rows from mask_variant_stats (data.table; no shell/awk)
+.mask_stats_dt <- NULL
+.id_aliases <- function(ids) {
+  ids <- as.character(ids)
+  out <- ids
+  out <- c(out, ifelse(startsWith(ids, "chr"), substring(ids, 4L), paste0("chr", ids)))
+  unique(out[nzchar(out) & !is.na(out)])
+}
+.stats_for_ids <- function(ids) {
+  ids <- unique(as.character(ids))
+  ids <- ids[nzchar(ids) & !is.na(ids)]
+  if (!length(ids)) return(tibble())
+  want <- .id_aliases(ids)
+
+  if (nzchar(.mask_stats_path) && file.exists(.mask_stats_path)) {
+    got <- tryCatch({
+      if (is.null(.mask_stats_dt)) {
+        .mask_stats_dt <<- data.table::fread(
+          .mask_stats_path,
+          sep = "\t",
+          showProgress = FALSE,
+          nThread = 1L
+        )
+        if (!"ID" %in% names(.mask_stats_dt)) {
+          stop("mask_variant_stats.tsv missing ID column")
+        }
+        message("Loaded mask_variant_stats into memory: ", nrow(.mask_stats_dt), " rows")
+      }
+      sub <- .mask_stats_dt[ID %in% want]
+      if (nrow(sub) == 0L) {
+        tibble()
+      } else {
+        # remap stats ID back to the query ID form used by the caller
+        alias_to_query <- new.env(parent = emptyenv())
+        for (q in ids) {
+          for (a in .id_aliases(q)) assign(a, q, envir = alias_to_query)
+        }
+        sub <- tibble::as_tibble(sub)
+        sub$ID <- vapply(as.character(sub$ID), function(a) {
+          if (exists(a, envir = alias_to_query, inherits = FALSE)) get(a, envir = alias_to_query) else a
+        }, character(1))
+        distinct(sub, ID, .keep_all = TRUE)
+      }
+    }, error = function(e) {
+      message("mask_stats subset failed: ", conditionMessage(e))
+      NULL
+    })
+    if (!is.null(got) && nrow(got) > 0) return(got)
+  }
+
+  # fallback: thin pathogenic/synonymous extracts
+  bits <- list()
+  if (!is.null(pathogenic_annotations) && nrow(pathogenic_annotations) > 0) {
+    bits[[length(bits) + 1L]] <- pathogenic_annotations %>% filter(ID %in% want)
+  }
+  if (!is.null(synonymous_annotations) && nrow(synonymous_annotations) > 0) {
+    bits[[length(bits) + 1L]] <- synonymous_annotations %>% filter(ID %in% want)
+  }
+  if (!length(bits)) return(tibble(ID = character()))
+  bind_rows(bits) %>% distinct(ID, .keep_all = TRUE)
+}
+
+.join_gene_carriers <- function(df) {
+  if (is.null(report_gene_carriers) || nrow(report_gene_carriers) == 0L) {
+    return(df %>% mutate(Cases = NA_integer_, Controls = NA_integer_))
+  }
+  carr <- report_gene_carriers %>%
+    select(GENE, MASK, THRESH, Cases = n_case_carriers, Controls = n_control_carriers)
+  df %>% left_join(carr, by = c("GENE", "MASK", "THRESH"))
+}
+
+.fill_variant_carriers_from_afcc <- function(df) {
+  # Rare-variant approx: alt allele count ≈ carrier count when mostly heterozygous
+  if (!all(c("A1FREQ_CASES", "A1FREQ_CONTROLS", "N_CASES", "N_CONTROLS") %in% names(df))) {
+    return(df)
+  }
+  if (!"n_case_carrier" %in% names(df)) df$n_case_carrier <- NA_real_
+  if (!"n_control_carrier" %in% names(df)) df$n_control_carrier <- NA_real_
+  df %>%
+    mutate(
+      n_case_carrier = if_else(
+        is.na(n_case_carrier) & is.finite(A1FREQ_CASES) & is.finite(N_CASES),
+        as.integer(round(A1FREQ_CASES * 2 * N_CASES)),
+        as.integer(n_case_carrier)
+      ),
+      n_control_carrier = if_else(
+        is.na(n_control_carrier) & is.finite(A1FREQ_CONTROLS) & is.finite(N_CONTROLS),
+        as.integer(round(A1FREQ_CONTROLS * 2 * N_CONTROLS)),
+        as.integer(n_control_carrier)
+      )
+    )
+}
+
+# Prebuilt slim tables from build_regenie_report_tables.py — required
+.report_prefix <- paste0("data/final/", params$project_name, ".report")
+.pre_top_fp <- paste0(.report_prefix, ".top_genes_ADD.tsv")
+.pre_skat_fp <- paste0(.report_prefix, ".top_genes_SKAT.tsv")
+.pre_contrib_fp <- paste0(.report_prefix, ".variant_contrib.tsv")
+.pre_cons_fp <- paste0(.report_prefix, ".consequence_matrix.tsv")
+.pre_carr_fp <- paste0(.report_prefix, ".gene_carriers.tsv")
+.pre_chek2_carr_fp <- paste0(.report_prefix, ".chek2_carriers.tsv")
+.required_report_files <- c(
+  .pre_top_fp, .pre_skat_fp, .pre_contrib_fp, .pre_cons_fp,
+  .pre_carr_fp, .pre_chek2_carr_fp
+)
+.missing_report <- .required_report_files[!file.exists(.required_report_files)]
+if (length(.missing_report)) {
+  stop(
+    "Missing required prebuilt report tables. Run build_regenie_report_tables first.\n",
+    paste(" -", .missing_report, collapse = "\n")
+  )
+}
+report_top_genes <- read_tsv(.pre_top_fp, show_col_types = FALSE)
+report_top_skat <- read_tsv(.pre_skat_fp, show_col_types = FALSE)
+report_contrib <- read_tsv(.pre_contrib_fp, show_col_types = FALSE)
+report_consequence <- read_tsv(.pre_cons_fp, show_col_types = FALSE)
+report_gene_carriers <- read_tsv(.pre_carr_fp, show_col_types = FALSE)
+report_chek2_carriers <- read_tsv(.pre_chek2_carr_fp, show_col_types = FALSE)
+message("Loaded prebuilt report tables: ", .report_prefix, ".*")
+
+# Snplist not needed when prebuilt contrib/consequence tables are present
+mask_snplist <- tibble(
+  mask_id = character(), ID = character(),
+  GENE = character(), MASK = character(), THRESH = character()
+)
+message("Skipping full snplist load (using prebuilt report tables)")
+
+# OR 95% CI from BETA ± 1.96*SE
+.add_or_ci <- function(df) {
+  df %>%
+    mutate(
+      OR_L95 = if_else(is.finite(BETA) & is.finite(SE), exp(BETA - 1.96 * SE), NA_real_),
+      OR_U95 = if_else(is.finite(BETA) & is.finite(SE), exp(BETA + 1.96 * SE), NA_real_)
+    )
+}
+single_variant <- .add_or_ci(single_variant)
 
 # Load gene-based data from all chromosomes
 gene_based_list <- list()
@@ -133,20 +368,15 @@ for(i in 1:22) {
   }
 }
 
-# Combine all gene-based rows (all TEST types: ADD, ADD-SKAT, ADD-SKATO, …) — do not filter here
+# Combine all gene-based rows (all TEST types) — FDR applied within family below
 gene_based_all <- bind_rows(gene_based_list) %>%
   mutate(across(c(CHROM, GENPOS, N, N_CASES, N_CONTROLS), as.integer),
          across(c(A1FREQ, A1FREQ_CASES, A1FREQ_CONTROLS, BETA, SE, CHISQ, LOG10P), as.numeric)) %>%
   mutate(CHROM = as.factor(CHROM),
          PVAL = 10^(-LOG10P)) %>%
-  mutate(
-    PVAL_ADJ = p.adjust(PVAL, method = "BH"),
-    LOG10P_ADJ = -log10(PVAL_ADJ)
-  ) %>%
-  # OR only meaningful for additive burden (ADD); leave NA for ADD-SKAT / ADD-SKATO etc.
+  # OR only meaningful for additive burden (ADD)
   mutate(OR = if_else(TEST == "ADD" & is.finite(BETA), exp(BETA), NA_real_))
 
-# Data quality check (all tests)
 if(any(is.na(gene_based_all$LOG10P))) {
   warning(sprintf("Warning: %d gene-based tests have NA LOG10P values", sum(is.na(gene_based_all$LOG10P))))
 }
@@ -159,7 +389,6 @@ if(length(add_beta) && any(is.finite(add_beta) & abs(add_beta) > 20)) {
 }
 
 # REGENIE gene-based ID: GENE.MASK.<aaf_suffix> — suffix can contain dots (0.01, 0.001, …).
-# Do NOT use sub(".*\\.(.*)$", ID): for WDR31.M1.0.01 that wrongly yields "01" instead of "0.01".
 .regenie_split_gene_mask_thresh <- function(ids) {
   ids <- as.character(ids)
   n <- length(ids)
@@ -185,8 +414,33 @@ gene_based_all <- gene_based_all %>%
     MAF_Filter = THRESH
   )
 
-# Burden (ADD) only: used for BETA/OR, directional language, volcano, mask summaries (mean beta), CHEK2 burden
-gene_based_add <- gene_based_all %>% filter(TEST == "ADD")
+# BH within family: ADD alone; SKAT+SKATO together; any other TEST each alone
+.bh_within <- function(df) {
+  if (nrow(df) == 0L) return(df)
+  df %>%
+    mutate(
+      PVAL_ADJ = {
+        ok <- is.finite(PVAL) & PVAL > 0 & PVAL <= 1
+        out <- rep(NA_real_, n())
+        if (any(ok)) out[ok] <- p.adjust(PVAL[ok], method = "BH")
+        out
+      },
+      LOG10P_ADJ = -log10(PVAL_ADJ)
+    )
+}
+
+gene_based_add <- gene_based_all %>% filter(TEST == "ADD") %>% .bh_within() %>% .add_or_ci()
+gene_based_skat <- gene_based_all %>%
+  filter(TEST %in% c("ADD-SKAT", "ADD-SKATO")) %>%
+  .bh_within()
+gene_based_other <- gene_based_all %>%
+  filter(!TEST %in% c("ADD", "ADD-SKAT", "ADD-SKATO")) %>%
+  group_by(TEST) %>%
+  group_modify(~ .bh_within(.x)) %>%
+  ungroup()
+
+# Archive table carries family-specific FDR (not one mega-BH across all TESTs)
+gene_based_all <- bind_rows(gene_based_add, gene_based_skat, gene_based_other)
 ```
 
 ## Summary and quality
@@ -215,8 +469,7 @@ summary_df <- data.frame(
 )
 
 kable(summary_df, format = "html", col.names = c("Metric", "Count")) %>%
-  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
-  column_spec(1, bold = TRUE)
+  .style_report_kable(font_size = 13, full_width = FALSE, gene_col = 1L)
 ```
 
 ### Quality metrics
@@ -255,8 +508,7 @@ quality_df <- data.frame(
 
 kable(quality_df, format = "html",
       col.names = c("Quality Metric", "Value")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
-    column_spec(1, bold = TRUE)
+    .style_report_kable(font_size = 13, full_width = FALSE, gene_col = 1L)
 ```
 
 ## Single-variant results
@@ -280,76 +532,61 @@ significant_variants <- single_variant %>%
   filter(!is.na(LOG10P), LOG10P > sig_log10p_thresh) %>%
   arrange(desc(LOG10P))
 
+.annot_join <- function(ids_df) {
+  # subset stats/annot for just these IDs (never load full mask table)
+  stats <- .stats_for_ids(ids_df$ID)
+  if (nrow(stats) == 0L) return(ids_df)
+  ids_df %>% left_join(stats, by = "ID", suffix = c("", ".ann"))
+}
+
 if (nrow(significant_variants) == 0L) {
   cat("None above exome-wide threshold (LOG10P > ", sig_log10p_thresh, ").\n", sep = "")
+  significant_variants_export <- significant_variants
 } else {
-  if (!is.null(pathogenic_annotations) && nrow(pathogenic_annotations) > 0L) {
-    sig_display <- significant_variants %>%
-      dplyr::left_join(pathogenic_annotations, by = "ID") %>%
-      dplyr::mutate(
-        Variant = paste0("chr", CHROM, ":", GENPOS, " ", REF, ">", ALT),
-        burden_extract = dplyr::case_when(
-          suppressWarnings(as.numeric(Variant.LoF_level)) == 1 ~ "Pathogenic (in M1 extract)",
-          suppressWarnings(as.numeric(Variant.LoF_level)) == 2 ~ "VUS (in M2 extract)",
-          TRUE ~ "Not in pathogenic/VUS extract"
-        ),
-        Gene_lab = ifelse(is.na(Gene) | Gene == "", "—", as.character(Gene))
-      ) %>%
-      dplyr::select(Variant, ID, Gene_lab, burden_extract, HGVSc, HGVSp, A1FREQ, OR, LOG10P, PVAL, PVAL_ADJ) %>%
-      dplyr::arrange(PVAL)
+  sig_joined <- .annot_join(significant_variants)
+  sig_joined <- .fill_variant_carriers_from_afcc(sig_joined)
+  if (!"Gene" %in% names(sig_joined)) sig_joined$Gene <- NA_character_
+  if (!"HGVSc" %in% names(sig_joined)) sig_joined$HGVSc <- NA_character_
+  if (!"HGVSp" %in% names(sig_joined)) sig_joined$HGVSp <- NA_character_
+  if (!"ClinVar.SIG" %in% names(sig_joined)) sig_joined[["ClinVar.SIG"]] <- NA_character_
+  if (!"AutoGVP" %in% names(sig_joined)) sig_joined$AutoGVP <- NA_character_
+  if (!"n_case_carrier" %in% names(sig_joined)) sig_joined$n_case_carrier <- NA_integer_
+  if (!"n_control_carrier" %in% names(sig_joined)) sig_joined$n_control_carrier <- NA_integer_
 
-    sig_cap <- paste0("Exome-wide hits (n = ", nrow(sig_display), "); join: pathogenic_vus.csv (M1/M2 extract).")
-    sig_view <- sig_display %>%
-      dplyr::mutate(PVAL = fmt_small_p(PVAL), PVAL_ADJ = fmt_small_p(PVAL_ADJ))
-
-    knitr::kable(
-      sig_view,
-      format = "html",
-      digits = 4,
-      col.names = c(
-        "Variant", "ID", "Gene (extract)", "Pathogenic/VUS extract",
-        "HGVSc", "HGVSp", "Alt freq", "OR", "−log10(p)", "P-value", "FDR P-value"
-      ),
-      caption = sig_cap
+  sig_display <- sig_joined %>%
+    mutate(
+      Variant = paste0("chr", CHROM, ":", GENPOS, " ", REF, ">", ALT),
+      Gene_lab = ifelse(is.na(Gene) | Gene == "", "—", as.character(Gene))
     ) %>%
-      kableExtra::kable_styling(
-        full_width = TRUE,
-        bootstrap_options = c("striped", "hover", "condensed"),
-        font_size = 11
-      ) %>%
-      kableExtra::column_spec(1, bold = TRUE, extra_css = "word-break: break-all; font-size: 0.92em; max-width: 9rem;") %>%
-      kableExtra::column_spec(2, extra_css = "word-break: break-all; font-size: 0.92em; max-width: 11rem;") %>%
-      kableExtra::column_spec(3:6, extra_css = "font-size: 0.92em;") %>%
-      kableExtra::column_spec(9:11, color = "red") %>%
-      kableExtra::scroll_box(width = "100%", height = "420px") %>%
-      print()
-  } else {
-    sig_display <- significant_variants %>%
-      dplyr::mutate(Variant = paste0("chr", CHROM, ":", GENPOS, " ", REF, ">", ALT)) %>%
-      dplyr::select(Variant, ID, A1FREQ, OR, LOG10P, PVAL, PVAL_ADJ) %>%
-      dplyr::arrange(PVAL)
-
-    sig_view <- sig_display %>%
-      dplyr::mutate(PVAL = fmt_small_p(PVAL), PVAL_ADJ = fmt_small_p(PVAL_ADJ))
-
-    knitr::kable(
-      sig_view,
-      format = "html",
-      digits = 4,
-      caption = paste0("Exome-wide hits (n = ", nrow(sig_display), "); pathogenic_vus.csv not available.")
+    select(
+      Variant, ID, Gene_lab, HGVSc, HGVSp, `ClinVar.SIG`, AutoGVP,
+      n_case_carrier, n_control_carrier,
+      A1FREQ, OR, OR_L95, OR_U95, LOG10P, PVAL, PVAL_ADJ
     ) %>%
-      kableExtra::kable_styling(
-        full_width = TRUE,
-        bootstrap_options = c("striped", "hover", "condensed"),
-        font_size = 11
-      ) %>%
-      kableExtra::column_spec(1, bold = TRUE, extra_css = "word-break: break-all; font-size: 0.92em; max-width: 9rem;") %>%
-      kableExtra::column_spec(2, extra_css = "word-break: break-all; font-size: 0.92em; max-width: 11rem;") %>%
-      kableExtra::scroll_box(width = "100%", height = "360px") %>%
-      print()
-  }
+    arrange(PVAL)
 
   significant_variants_export <- sig_display
+
+  sig_view <- sig_display %>%
+    mutate(PVAL = fmt_small_p(PVAL), PVAL_ADJ = fmt_small_p(PVAL_ADJ))
+
+  knitr::kable(
+    sig_view,
+    format = "html",
+    digits = 4,
+    col.names = c(
+      "Variant", "ID", "Gene", "HGVSc", "HGVSp", "ClinVar.SIG", "AutoGVP",
+      "n case", "n ctrl",
+      "Alt freq", "OR", "OR L95", "OR U95", "−log10(p)", "P", "FDR P"
+    ),
+    caption = paste0(
+      "Exome-wide hits (n = ", nrow(sig_display),
+      "). n case/ctrl = carriers from mask_variant_stats when available; ",
+      "else ≈ alt allele count from REGENIE --af-cc (A1FREQ × 2 × N)."
+    )
+  ) %>%
+    .style_report_kable(font_size = 12, full_width = TRUE, gene_col = 3L, scroll_h = "420px") %>%
+    print()
 }
 ```
 
@@ -377,15 +614,17 @@ print(manhattan_plot)
 ### QQ plot
 
 ```{r qq-plot,echo=FALSE,message=FALSE,warning=FALSE, fig.cap="Single-variant QQ with genomic inflation (λ) in the subtitle."}
-qq_data <- single_variant %>%
-    filter(!is.na(LOG10P)) %>%
-    arrange(desc(LOG10P)) %>%
-    mutate(
-        observed = sort(LOG10P, decreasing = TRUE),
-        expected = sort(-log10(ppoints(length(LOG10P))), decreasing = TRUE)
-    )
+qq_n <- single_variant %>% filter(is.finite(LOG10P))
+qq_data <- tibble(
+  observed = sort(qq_n$LOG10P, decreasing = TRUE),
+  expected = sort(-log10(ppoints(nrow(qq_n))), decreasing = TRUE)
+)
 
-lam_txt <- if (is.finite(single_lambda)) paste0("λ = ", round(single_lambda, 3)) else "λ = NA (insufficient finite P-values)"
+lam_txt <- if (exists("single_lambda") && is.finite(single_lambda)) {
+  paste0("λ = ", round(single_lambda, 3))
+} else {
+  "λ = NA (insufficient finite P-values)"
+}
 
 qq_plot <- ggplot(qq_data, aes(x = expected, y = observed)) +
     geom_point(alpha = 0.55, color = "#2E86AB") +
@@ -403,7 +642,21 @@ Deviation from the diagonal at the tail reflects excess signal. **λ** is the me
 
 ## Gene-based results
 
-Exports use explicit names: **`r paste0(params$project_name, "_gene_based_results_alltests_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (all `TEST` values), **`r paste0(params$project_name, "_gene_based_results_ADDonly_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (ADD only), and **`r paste0(params$project_name, "_gene_based_meta_input_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (columns used for cross-freeze meta). Use **all-tests** for archive/SKAT/SKATO; **meta_input** matches downstream meta pipelines.
+```{=html}
+<div class="regenie-jump">
+<strong>Jump to mask results:</strong>
+<a href="#m1-pathogenic">M1</a>
+<a href="#m2-vus">M2</a>
+<a href="#m3-pathogenic--vus">M3</a>
+<a href="#m4-synonymous-negative-control">M4</a>
+&nbsp;|&nbsp;
+<a href="#variants-in-burden-masks-for-top-genes-add">Mask variants</a>
+<a href="#chek2-add">CHEK2</a>
+<a href="#volcano-add">Volcano</a>
+</div>
+```
+
+Exports: **`r paste0(params$project_name, "_gene_based_results_alltests_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (archive), **`r paste0(params$project_name, "_gene_based_results_ADDonly_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (directional burden), **`r paste0(params$project_name, "_gene_based_results_SKAT_SKATO_", format(Sys.Date(), "%Y%m%d"), ".csv")`** (non-directional; no BETA/OR), and **`r paste0(params$project_name, "_gene_based_meta_input_", format(Sys.Date(), "%Y%m%d"), ".csv")`**. FDR is within family (ADD vs SKAT+SKATO).
 
 ### Burden (ADD) — summary by mask
 
@@ -421,161 +674,413 @@ mask_summary <- gene_based_add %>%
 
 kable(mask_summary, format = "html", digits = 3,
       col.names = c("Mask", "Tests (gene×mask×threshold)", "FDR significant tests", "Top Gene", "Max −log10(P) (display cap 100)", "Mean Beta", "Significance Rate (%)")) %>%
-  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
-  column_spec(1, bold = TRUE)
+  .style_report_kable(font_size = 13, full_width = FALSE, gene_col = 1L)
 ```
 
 **Mask note:** `M4` is a negative-control mask built from synonymous variants only.
 It explicitly excludes `M1/M2` variants and a blacklist of potential MNP-pair IDs that did not pass full validation, to reduce false-negative MNP contamination in controls.
 
+**Gene×consequence excludes:** sites matching rules in `mask_gene_consequence_exclude.txt` are dropped from **all** masks at REGENIE preprocess (annotation/set). Current rule: **CHEK2 + missense_variant** (including compound VEP consequences that contain missense). Rationale: CHEK2 missense variants are not treated as disease-contributing in this analysis despite some AutoGVP likely-pathogenic calls. Dropped IDs are written to `data/regenie/mask_gene_consequence_excluded.csv`.
+
 ### Top genes by clinical category (burden ADD only)
 
-Gene-based REGENIE is run with **`--aaf-bins 0.01,0.001,0.0001`**, so each gene is tested under several **allele-frequency ceilings** in addition to **singleton** and **all variants** (REGENIE’s `all` bin is shown here as **“All variants”**). Stricter MAF bins keep rarer variation; broader bins add more variants per gene (often lower power per variant, different correlation structure).
+**Sorted by:** gene ADD **−log10(P)** (highest first) within each mask × AAF bin.
+
+**HTML:** top **10** genes for **0.01**, **0.001**, and **singleton**.
+
+**CSV:** top **20** genes for **0.01, 0.001, 0.0001, singleton, All variants** (All variants is CSV-only, not shown in HTML).
+
+| Bin | Meaning |
+|-----|---------|
+| **0.01** | AAF ≤ 1% |
+| **0.001** | AAF ≤ 0.1% |
+| **0.0001** | AAF ≤ 0.01% (CSV) |
+| **singleton** | MAC=1 sites burdened together — **not** single-variant GWAS |
+| **All variants** | no AAF ceiling (CSV only) |
+
+OR 95% CI = `exp(BETA ± 1.96×SE)`. Cases/Controls = unique samples carrying ≥1 mask variant in the gene (from prebuilt `*.report.gene_carriers.tsv`).
+
+Prefer prebuilt tables from `build_regenie_report_tables.py` (`data/final/{project}.report.*.tsv`) when present — report only displays.
 
 ```{r topgenes-add-helper, include=FALSE}
-# Used by one chunk per MAF bin below (real Markdown headings; kable as last expr per chunk).
-regenie_topgenes_add_table <- function(mask, thresh) {
-  mask_chr <- mask
-  thresh_chr <- thresh
-  tab <- gene_based_add %>%
-    dplyr::filter(MASK == mask_chr, THRESH == thresh_chr) %>%
-    dplyr::slice_max(LOG10P, n = 10L, with_ties = FALSE) %>%
-    dplyr::select(GENE, BETA, SE, LOG10P, PVAL, PVAL_ADJ, OR) %>%
-    dplyr::arrange(dplyr::desc(LOG10P))
+HTML_THRESH <- c("0.01", "0.001", "singleton")
+CSV_THRESH <- c("0.01", "0.001", "0.0001", "singleton", "All variants")
+
+.qq_gene_add <- function(mask, threshs = HTML_THRESH) {
+  # One QQ per AAF bin for this mask (ADD only), faceted — λ GC labeled on each panel
+  dat <- gene_based_add %>%
+    filter(MASK == mask, THRESH %in% threshs, is.finite(PVAL), PVAL > 0, PVAL <= 1) %>%
+    mutate(THRESH = factor(THRESH, levels = threshs))
+  if (nrow(dat) == 0L) {
+    cat("_No ADD p-values for QQ: ", mask, "._\n\n", sep = "")
+    return(invisible(NULL))
+  }
+  lam <- dat %>%
+    group_by(THRESH) %>%
+    summarise(
+      n_tests = n(),
+      lambda = {
+        pv <- PVAL
+        if (length(pv) < 10L) {
+          NA_real_
+        } else {
+          median(qchisq(1 - pv, 1), na.rm = TRUE) / qchisq(0.5, 1)
+        }
+      },
+      .groups = "drop"
+    ) %>%
+    mutate(
+      lam_lab = ifelse(is.finite(lambda), sprintf("%.3f", lambda), "NA"),
+      facet_lab = sprintf("%s  |  λ = %s", as.character(THRESH), lam_lab)
+    )
+  panel_levels <- lam$facet_lab[match(threshs, as.character(lam$THRESH))]
+  panel_levels <- panel_levels[!is.na(panel_levels)]
+  qq <- dat %>%
+    left_join(lam %>% select(THRESH, facet_lab), by = "THRESH") %>%
+    mutate(facet_lab = factor(facet_lab, levels = panel_levels)) %>%
+    group_by(facet_lab) %>%
+    arrange(PVAL, .by_group = TRUE) %>%
+    mutate(
+      expected = ppoints(n()),
+      observed = PVAL,
+      neglog10_exp = -log10(expected),
+      neglog10_obs = -log10(observed)
+    ) %>%
+    ungroup()
+  lim <- max(qq$neglog10_exp, qq$neglog10_obs, na.rm = TRUE)
+  lim <- max(lim, 1)
+  cat(sprintf(
+    "\n**ADD burden QQ: %s** (one panel per AAF bin; λ = genomic inflation from median χ²)\n\n",
+    mask
+  ))
+  print(
+    ggplot(qq, aes(x = neglog10_exp, y = neglog10_obs)) +
+      geom_abline(slope = 1, intercept = 0, color = "grey50", linetype = "dashed") +
+      geom_point(size = 1.35, alpha = 0.65, color = "#2E86AB") +
+      facet_wrap(~facet_lab, nrow = 1) +
+      coord_equal(xlim = c(0, lim), ylim = c(0, lim)) +
+      labs(
+        x = expression(Expected ~ -log[10](p)),
+        y = expression(Observed ~ -log[10](p)),
+        title = paste0("Gene-based ADD QQ — ", mask)
+      ) +
+      theme(
+        legend.position = "none",
+        strip.text = element_text(size = 12, face = "bold"),
+        plot.title = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 12),
+        axis.text = element_text(size = 11)
+      )
+  )
+  invisible(NULL)
+}
+
+regenie_topgenes_add_table <- function(mask, thresh, n = 10L) {
+  if (!is.null(report_top_genes) && nrow(report_top_genes) > 0) {
+    tab <- report_top_genes %>%
+      filter(MASK == mask, THRESH == thresh) %>%
+      arrange(rank) %>%
+      slice_head(n = n) %>%
+      select(GENE, MASK, THRESH, BETA, SE, OR, OR_L95, OR_U95, LOG10P, PVAL, PVAL_ADJ)
+  } else {
+    tab <- gene_based_add %>%
+      filter(MASK == mask, THRESH == thresh) %>%
+      slice_max(LOG10P, n = n, with_ties = FALSE) %>%
+      select(GENE, MASK, THRESH, BETA, SE, OR, OR_L95, OR_U95, LOG10P, PVAL, PVAL_ADJ) %>%
+      arrange(desc(LOG10P))
+  }
   if (nrow(tab) == 0L) return(invisible(NULL))
-  knitr::kable(
-    tab,
-    format = "html",
-    digits = 4,
-    col.names = c("Gene", "Beta", "SE", "-log10(P)", "P-value", "FDR P-value", "OR"),
-    caption = paste0("Top genes (ADD): ", mask, " — ", thresh)
-  ) %>%
-    kableExtra::kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
-    kableExtra::column_spec(1, bold = TRUE) %>%
-    kableExtra::column_spec(c(2, 4, 5), color = "red")
+  carr <- report_gene_carriers %>%
+    filter(MASK == mask, THRESH == thresh) %>%
+    select(GENE, Cases = n_case_carriers, Controls = n_control_carriers)
+  tab <- tab %>%
+    left_join(carr, by = "GENE") %>%
+    transmute(
+      Gene = GENE,
+      Cases, Controls,
+      Beta = BETA, SE, OR, `OR L95` = OR_L95, `OR U95` = OR_U95,
+      `-log10(P)` = LOG10P, P = PVAL, `FDR P` = PVAL_ADJ
+    )
+  cat(sprintf("\n**Top %d genes by ADD −log10(P): %s — %s**\n\n", n, mask, thresh))
+  knitr::kable(tab, format = "html", digits = 4) %>%
+    .style_report_kable(font_size = 13, full_width = FALSE, gene_col = 1L)
 }
 ```
 
-#### M1 (Pathogenic variants only)
-
-##### M1 — singleton
-
-```{r topgenes-m1-singleton, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M1", "singleton")
-```
-
-##### M1 — All variants
-
-```{r topgenes-m1-all-variants, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M1", "All variants")
-```
+#### M1 (Pathogenic)
 
 ##### M1 — 0.01
 
-```{r topgenes-m1-af01, echo=FALSE, message=FALSE, warning=FALSE}
+```{r topgenes-m1-af01, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
 regenie_topgenes_add_table("M1", "0.01")
 ```
 
 ##### M1 — 0.001
 
-```{r topgenes-m1-af001, echo=FALSE, message=FALSE, warning=FALSE}
+```{r topgenes-m1-af001, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
 regenie_topgenes_add_table("M1", "0.001")
 ```
 
-##### M1 — 0.0001
+##### M1 — singleton
 
-```{r topgenes-m1-af0001, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M1", "0.0001")
+```{r topgenes-m1-singleton, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+regenie_topgenes_add_table("M1", "singleton")
 ```
 
-#### M2 (VUS variants only)
-
-##### M2 — singleton
-
-```{r topgenes-m2-singleton, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M2", "singleton")
-```
-
-##### M2 — All variants
-
-```{r topgenes-m2-all-variants, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M2", "All variants")
-```
+#### M2 (VUS)
 
 ##### M2 — 0.01
 
-```{r topgenes-m2-af01, echo=FALSE, message=FALSE, warning=FALSE}
+```{r topgenes-m2-af01, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
 regenie_topgenes_add_table("M2", "0.01")
 ```
 
 ##### M2 — 0.001
 
-```{r topgenes-m2-af001, echo=FALSE, message=FALSE, warning=FALSE}
+```{r topgenes-m2-af001, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
 regenie_topgenes_add_table("M2", "0.001")
 ```
 
-##### M2 — 0.0001
+##### M2 — singleton
 
-```{r topgenes-m2-af0001, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M2", "0.0001")
+```{r topgenes-m2-singleton, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+regenie_topgenes_add_table("M2", "singleton")
 ```
 
-#### M3 (Pathogenic + VUS combined)
-
-##### M3 — singleton
-
-```{r topgenes-m3-singleton, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M3", "singleton")
-```
-
-##### M3 — All variants
-
-```{r topgenes-m3-all-variants, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M3", "All variants")
-```
+#### M3 (Pathogenic + VUS)
 
 ##### M3 — 0.01
 
-```{r topgenes-m3-af01, echo=FALSE, message=FALSE, warning=FALSE}
+```{r topgenes-m3-af01, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
 regenie_topgenes_add_table("M3", "0.01")
 ```
 
 ##### M3 — 0.001
 
-```{r topgenes-m3-af001, echo=FALSE, message=FALSE, warning=FALSE}
+```{r topgenes-m3-af001, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
 regenie_topgenes_add_table("M3", "0.001")
 ```
 
-##### M3 — 0.0001
+##### M3 — singleton
 
-```{r topgenes-m3-af0001, echo=FALSE, message=FALSE, warning=FALSE}
-regenie_topgenes_add_table("M3", "0.0001")
+```{r topgenes-m3-singleton, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+regenie_topgenes_add_table("M3", "singleton")
 ```
 
 #### M4 (Synonymous negative-control)
 
-```{r top-genes-m4,echo=FALSE,message=FALSE,warning=FALSE}
-# M4 (synonymous negative-control) - Top 10 genes
-m4_top <- gene_based_add %>%
-  filter(MASK == "M4") %>%
-  slice_max(LOG10P, n = 10, with_ties = FALSE) %>%
-  select(GENE, THRESH, BETA, SE, LOG10P, PVAL, PVAL_ADJ, OR) %>%
-  arrange(desc(LOG10P))
+##### M4 — 0.01
 
-if(nrow(m4_top) > 0) {
-  kable(m4_top, format = "html", digits = 4,
-        col.names = c("Gene", "MAF Filter", "Beta", "SE", "-log10(P)", "P-value", "FDR P-value", "OR")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
-    column_spec(1, bold = TRUE) %>%
-    column_spec(c(3, 5, 6), color = "red")
-} else {
-  invisible(NULL)
+```{r topgenes-m4-af01, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+regenie_topgenes_add_table("M4", "0.01")
+```
+
+##### M4 — 0.001
+
+```{r topgenes-m4-af001, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+regenie_topgenes_add_table("M4", "0.001")
+```
+
+##### M4 — singleton
+
+```{r topgenes-m4-singleton, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+regenie_topgenes_add_table("M4", "singleton")
+```
+
+### Variants in burden masks for top genes (ADD)
+
+Snplist-exact membership from `data/regenie/chr*.step2_gene_based_masks.snplist`. HTML: top 10 × 0.01/0.001/singleton. CSV: top 20 × 0.01/0.001/0.0001/singleton/All variants.
+
+```{r variant-contrib-helper, include=FALSE}
+top_genes_for <- function(mask, thresh, n = 10L) {
+  if (!is.null(report_top_genes) && nrow(report_top_genes) > 0) {
+    return(
+      report_top_genes %>%
+        filter(MASK == mask, THRESH == thresh) %>%
+        arrange(rank) %>%
+        slice_head(n = n) %>%
+        transmute(
+          GENE,
+          gene_LOG10P = LOG10P,
+          gene_PVAL_ADJ = PVAL_ADJ,
+          gene_BETA = BETA,
+          gene_OR = OR,
+          gene_OR_L95 = OR_L95,
+          gene_OR_U95 = OR_U95,
+          gene_A1FREQ = A1FREQ,
+          gene_A1FREQ_CASES = A1FREQ_CASES,
+          gene_A1FREQ_CONTROLS = A1FREQ_CONTROLS
+        )
+    )
+  }
+  gene_based_add %>%
+    filter(MASK == mask, THRESH == thresh) %>%
+    slice_max(LOG10P, n = n, with_ties = FALSE) %>%
+    arrange(desc(LOG10P)) %>%
+    transmute(
+      GENE,
+      gene_LOG10P = LOG10P,
+      gene_PVAL_ADJ = PVAL_ADJ,
+      gene_BETA = BETA,
+      gene_OR = OR,
+      gene_OR_L95 = OR_L95,
+      gene_OR_U95 = OR_U95,
+      gene_A1FREQ = A1FREQ,
+      gene_A1FREQ_CASES = A1FREQ_CASES,
+      gene_A1FREQ_CONTROLS = A1FREQ_CONTROLS
+    )
 }
+
+.enrich_ids <- function(df) {
+  stats <- .stats_for_ids(df$ID)
+  if (nrow(stats) == 0L) return(df)
+  keep <- intersect(names(stats), c(
+    "ID", "Gene", "Variant.LoF_level", "Variant.Class", "Variant.Consequence",
+    "HGVSc", "HGVSp", "ClinVar.SIG", "AutoGVP",
+    "n_case_carrier", "n_control_carrier", "AF", "AC"
+  ))
+  df %>% left_join(stats %>% select(all_of(keep)), by = "ID")
+}
+
+contrib_table <- function(mask, thresh, n = 10L) {
+  if (!is.null(report_contrib) && nrow(report_contrib) > 0) {
+    tg <- top_genes_for(mask, thresh, n)
+    if (nrow(tg) == 0L) return(tibble())
+    return(
+      report_contrib %>%
+        filter(MASK == mask, THRESH == thresh, GENE %in% tg$GENE) %>%
+        arrange(desc(gene_LOG10P), GENE, ID)
+    )
+  }
+  tg <- top_genes_for(mask, thresh, n)
+  if (nrow(tg) == 0L || nrow(mask_snplist) == 0L) return(tibble())
+  mem <- mask_snplist %>%
+    filter(MASK == mask, THRESH == thresh, GENE %in% tg$GENE) %>%
+    select(GENE, ID, MASK, THRESH)
+  if (nrow(mem) == 0L) return(tibble())
+  mem %>%
+    left_join(tg, by = "GENE") %>%
+    .enrich_ids() %>%
+    arrange(desc(gene_LOG10P), GENE, ID)
+}
+
+contrib_consequence_matrix <- function(mask, thresh, tab) {
+  # Split VEP compound consequences on &; each atom gets +1 (e.g. missense&splice → both)
+  if (nrow(tab) == 0L || !"Variant.Consequence" %in% names(tab)) return(tibble())
+  rows <- tab %>%
+    filter(!is.na(Variant.Consequence), Variant.Consequence != "", Variant.Consequence != ".") %>%
+    select(GENE, cons = Variant.Consequence)
+  if (nrow(rows) == 0L) return(tibble())
+  rows %>%
+    mutate(atom = strsplit(as.character(cons), "&", fixed = TRUE)) %>%
+    tidyr::unnest_longer(atom) %>%
+    mutate(atom = trimws(atom)) %>%
+    filter(nzchar(atom)) %>%
+    count(GENE, atom, name = "n") %>%
+    tidyr::pivot_wider(names_from = atom, values_from = n, values_fill = 0)
+}
+
+render_contrib <- function(mask, thresh, n = 10L) {
+  cat(sprintf(
+    '<div class="regenie-block-sep"><p style="margin:0 0 0.4rem 0; font-weight:600;">%s — %s</p></div>\n',
+    mask, thresh
+  ))
+  tab <- contrib_table(mask, thresh, n = n)
+  if (nrow(tab) == 0L) {
+    cat("_No snplist variants for ", mask, " — ", thresh, "._\n\n", sep = "")
+    return(invisible(NULL))
+  }
+  if (!"HGVSc" %in% names(tab)) tab$HGVSc <- NA_character_
+  if (!"HGVSp" %in% names(tab)) tab$HGVSp <- NA_character_
+  if (!"Variant.Consequence" %in% names(tab)) tab$Variant.Consequence <- NA_character_
+  if (!"ClinVar.SIG" %in% names(tab)) tab[["ClinVar.SIG"]] <- NA_character_
+  if (!"AutoGVP" %in% names(tab)) tab$AutoGVP <- NA_character_
+  if (!"n_case_carrier" %in% names(tab)) tab$n_case_carrier <- NA_integer_
+  if (!"n_control_carrier" %in% names(tab)) tab$n_control_carrier <- NA_integer_
+
+  show <- tab %>%
+    transmute(
+      Gene = GENE, ID, HGVSc, HGVSp,
+      Consequence = .fmt_consequence_label(Variant.Consequence),
+      `ClinVar.SIG`, AutoGVP,
+      n_case = n_case_carrier, n_ctrl = n_control_carrier,
+      `Gene -log10(P)` = round(gene_LOG10P, 3),
+      `Gene FDR` = signif(gene_PVAL_ADJ, 3),
+      `Gene OR` = gene_OR
+    )
+  cat(sprintf(
+    "\n**Mask variants (snplist): %s — %s** (top %d genes by ADD −log10(P))\n\n",
+    mask, thresh, n
+  ))
+  print(
+    knitr::kable(show, format = "html", digits = 4) %>%
+      .style_report_kable(font_size = 12, full_width = TRUE, gene_col = 1L, scroll_h = "360px")
+  )
+
+  cat('<div style="height:1.6rem;"></div>\n')
+  mx <- contrib_consequence_matrix(mask, thresh, tab)
+  if (nrow(mx) > 0) {
+    cons_cols <- setdiff(names(mx), "GENE")
+    if (length(cons_cols)) {
+      names(mx)[names(mx) %in% cons_cols] <- .fmt_consequence_header(cons_cols)
+    }
+    names(mx)[names(mx) == "GENE"] <- "Gene"
+    cat(sprintf("\n**Consequence counts: %s — %s**\n\n", mask, thresh))
+    cat("Compound VEP terms split on `&`; each term counted.\n\n")
+    print(
+      knitr::kable(mx, format = "html") %>%
+        .style_report_kable(
+          font_size = 12, full_width = TRUE, gene_col = 1L,
+          header_wrap = TRUE, scroll_h = "320px"
+        )
+    )
+  }
+}
+```
+
+#### M1 mask variants (HTML: 0.01 / 0.001 / singleton)
+
+```{r qq-m1-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+.qq_gene_add("M1")
+```
+
+```{r variant-contrib-m1, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+for (th in HTML_THRESH) render_contrib("M1", th, n = 10L)
+```
+
+#### M2 mask variants (HTML: 0.01 / 0.001 / singleton)
+
+```{r qq-m2-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+.qq_gene_add("M2")
+```
+
+```{r variant-contrib-m2, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+for (th in HTML_THRESH) render_contrib("M2", th, n = 10L)
+```
+
+#### M3 mask variants (HTML: 0.01 / 0.001 / singleton)
+
+```{r qq-m3-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+.qq_gene_add("M3")
+```
+
+```{r variant-contrib-m3, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+for (th in HTML_THRESH) render_contrib("M3", th, n = 10L)
+```
+
+#### M4 mask variants (HTML: 0.01 / 0.001 / singleton)
+
+```{r qq-m4-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+.qq_gene_add("M4")
+```
+
+```{r variant-contrib-m4, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+for (th in HTML_THRESH) render_contrib("M4", th, n = 10L)
 ```
 
 ### Suggestive ADD burden signals
 
-_Exploratory table: strong raw p but not FDR-significant after genome-wide BH across all gene-based tests._
+_Exploratory table: strong raw p but not FDR-significant after BH among ADD tests only. Cases/Controls = unique snplist carriers (same as top-gene tables)._
 
 ```{r suggestive-genes,echo=FALSE,message=FALSE,warning=FALSE}
 top_by_raw_p <- gene_based_add %>%
@@ -587,23 +1092,24 @@ suggestive_genes <- top_by_raw_p %>%
   filter(LOG10P > 3, PVAL_ADJ >= 0.05) %>%
   arrange(PVAL) %>%
   slice_head(n = 15) %>%
-  select(GENE, MASK, THRESH, BETA, LOG10P, PVAL, PVAL_ADJ, OR)
+  select(GENE, MASK, THRESH, BETA, LOG10P, PVAL, PVAL_ADJ, OR) %>%
+  .join_gene_carriers() %>%
+  select(GENE, MASK, THRESH, Cases, Controls, BETA, LOG10P, PVAL, PVAL_ADJ, OR)
 
 if(nrow(suggestive_genes) > 0) {
     kable(suggestive_genes,
           format = "html", digits = 4,
           caption = "Suggestive ADD burden signals (exploratory)",
-          col.names = c("Gene", "Mask", "MAF Filter", "Beta", "Raw -log10(P)", "Raw P-value", "FDR P-value", "OR")) %>%
-        kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
-                      font_size = 13) %>%
-        column_spec(1, bold = TRUE) %>%
-        column_spec(c(4, 8), color = "orange")
+          col.names = c("Gene", "Mask", "MAF Filter", "Cases", "Controls",
+                        "Beta", "Raw -log10(P)", "Raw P-value", "FDR P-value", "OR")) %>%
+        .style_report_kable(font_size = 12, full_width = FALSE, gene_col = 1L) %>%
+        column_spec(c(6, 10), color = "orange")
 } else {
     cat("No suggestive associations found")
 }
 ```
 
-### Volcano (ADD)
+### Volcano (ADD) {#volcano-add}
 
 ```{r volcano-plot,echo=FALSE,message=FALSE,warning=FALSE, fig.cap="Burden ADD by mask (−log10 p capped at 100 in plot)."}
 gene_based_plot <- gene_based_add %>%
@@ -649,33 +1155,233 @@ volcano_plot <- volcano_plot +
 print(volcano_plot)
 ```
 
-### CHEK2 (ADD only)
+### CHEK2 (ADD)
 
-_Exploratory gene-level summary only; it does not address variant-level missingness, capture, or per-sample carrier data._
+Gene-level ADD burden for **M1 (pathogenic) only**, then M1 snplist variants with HGVSc/p and case/control **carrier** counts. M2/M3/M4 CHEK2 results are omitted here for now.
 
-```{r chek2-analysis,echo=FALSE,message=FALSE,warning=FALSE}
+**Note:** CHEK2 **missense** sites are excluded from all masks upstream (`mask_gene_consequence_exclude.txt`), so they should not appear in this snplist table.
+
+```{r chek2-analysis, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+.load_snplist_for_gene <- function(gene) {
+  files <- Sys.glob("data/regenie/chr*.step2_gene_based_masks.snplist")
+  if (!length(files)) return(tibble())
+  prefix <- paste0(gene, ".")
+  rows <- list()
+  for (fp in files) {
+    lines <- readLines(fp, warn = FALSE)
+    for (ln in lines) {
+      ln <- trimws(ln)
+      if (!nzchar(ln) || startsWith(ln, "#") || !startsWith(ln, prefix)) next
+      parts <- strsplit(ln, "\t", fixed = TRUE)[[1]]
+      if (length(parts) < 2L) next
+      mid <- parts[[1]]
+      vids <- strsplit(parts[[2]], ",", fixed = TRUE)[[1]]
+      vids <- vids[nzchar(vids)]
+      if (!length(vids)) next
+      sp <- strsplit(mid, ".", fixed = TRUE)[[1]]
+      if (length(sp) < 3L) next
+      thr_raw <- paste(sp[seq.int(3L, length(sp))], collapse = ".")
+      rows[[length(rows) + 1L]] <- tibble(
+        GENE = sp[[1]], MASK = sp[[2]],
+        THRESH = ifelse(thr_raw == "all", "All variants", thr_raw),
+        ID = vids
+      )
+    }
+  }
+  if (!length(rows)) return(tibble())
+  bind_rows(rows)
+}
+
 chek2_results <- gene_based_add %>%
-  filter(GENE == "CHEK2") %>%
-  select(GENE, MASK, THRESH, CHROM, GENPOS, ALLELE1, A1FREQ, BETA, OR, SE, LOG10P, PVAL, PVAL_ADJ, LOG10P_ADJ) %>%
+  filter(GENE == "CHEK2", MASK == "M1") %>%
+  select(GENE, MASK, THRESH, A1FREQ, BETA, OR, OR_L95, OR_U95, SE, LOG10P, PVAL, PVAL_ADJ) %>%
   arrange(MASK, THRESH)
 
-if(nrow(chek2_results) > 0) {
-  kable(chek2_results,
-        format = "html", digits = 4,
-        col.names = c("Gene", "Mask", "Threshold", "Chr", "Pos", "Alt Allele", "Alt Freq",
-                     "Beta", "OR", "SE", "-log10(P)", "P-value", "FDR P-value", "-log10(FDR P)")) %>%
-    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"), font_size = 13) %>%
-    column_spec(c(8, 10, 11), color = ifelse(!is.na(chek2_results$PVAL_ADJ) & chek2_results$PVAL_ADJ < 0.05, "red", "black"))
+if (nrow(chek2_results) > 0) {
+  print(
+    knitr::kable(
+      chek2_results, format = "html", digits = 4,
+      col.names = c(
+        "Gene", "Mask", "Threshold", "Alt freq",
+        "Beta", "OR", "OR L95", "OR U95", "SE", "-log10(P)", "P", "FDR P"
+      ),
+      caption = "CHEK2 ADD burden (M1 pathogenic only)"
+    ) %>%
+      .style_report_kable(font_size = 12, full_width = FALSE, gene_col = 1L)
+  )
 } else {
-  cat("_CHEK2 not found in ADD burden results._")
+  cat("_CHEK2 M1 not found in ADD burden results._\n")
 }
+
+cat('<div style="height:1.2rem;"></div>\n')
+
+chek2_mem <- .load_snplist_for_gene("CHEK2")
+chek2_html_bins <- c("0.01", "0.001")
+if (nrow(chek2_mem) > 0) {
+  chek2_mem <- chek2_mem %>% filter(MASK == "M1", THRESH %in% chek2_html_bins)
+}
+chek2_var <- tibble()
+if (nrow(chek2_mem) > 0) {
+  gene_join <- chek2_results %>%
+    select(GENE, MASK, THRESH, gene_LOG10P = LOG10P, gene_PVAL_ADJ = PVAL_ADJ, gene_OR = OR)
+  chek2_var <- chek2_mem %>%
+    left_join(gene_join, by = c("GENE", "MASK", "THRESH")) %>%
+    .enrich_ids() %>%
+    arrange(MASK, THRESH, ID)
+}
+
+if (nrow(chek2_var) == 0L) {
+  cat("_No CHEK2 M1 snplist variants found for HTML bins 0.01 / 0.001._\n")
+} else {
+  if (!"HGVSc" %in% names(chek2_var)) chek2_var$HGVSc <- NA_character_
+  if (!"HGVSp" %in% names(chek2_var)) chek2_var$HGVSp <- NA_character_
+  if (!"Variant.Consequence" %in% names(chek2_var)) chek2_var$Variant.Consequence <- NA_character_
+  if (!"ClinVar.SIG" %in% names(chek2_var)) chek2_var[["ClinVar.SIG"]] <- NA_character_
+  if (!"AutoGVP" %in% names(chek2_var)) chek2_var$AutoGVP <- NA_character_
+  if (!"n_case_carrier" %in% names(chek2_var)) chek2_var$n_case_carrier <- NA_integer_
+  if (!"n_control_carrier" %in% names(chek2_var)) chek2_var$n_control_carrier <- NA_integer_
+
+  chek2_show <- chek2_var %>%
+    transmute(
+      Mask = MASK, Bin = THRESH, ID, HGVSc, HGVSp,
+      Consequence = .fmt_consequence_label(Variant.Consequence),
+      `ClinVar.SIG`, AutoGVP,
+      n_case = n_case_carrier, n_ctrl = n_control_carrier,
+      `Gene -log10(P)` = round(gene_LOG10P, 3),
+      `Gene FDR` = signif(gene_PVAL_ADJ, 3),
+      `Gene OR` = gene_OR
+    )
+  print(
+    knitr::kable(
+      chek2_show, format = "html", digits = 4,
+      caption = "CHEK2 M1 mask variants (snplist): HGVSc/p and case/control carriers"
+    ) %>%
+      .style_report_kable(font_size = 12, full_width = TRUE, gene_col = NULL, scroll_h = "420px")
+  )
+}
+
+cat('<div style="height:1.4rem;"></div>\n')
 ```
 
-### SKAT and SKATO (gene-based)
+<!-- CHEK2 PCA (parked — set eval=TRUE and uncomment markdown to restore)
+### CHEK2 carriers in PCA space
 
-SKAT and SKATO test whether rare variants in a gene are associated with disease without assuming a common effect direction. They are presented as supporting (non-directional) evidence alongside ADD burden results.
+Samples carrying any **CHEK2 M1 (pathogenic)** mask variant (AAF bins 0.01 and 0.001 only). PCs / status / AncGroup from hardcoded `sample_meta.csv`.
+-->
 
-### Top results (SKAT and SKATO only)
+```{r chek2-pca, eval=FALSE, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=4.5, results='asis'}
+.sample_meta_fp <- "sample_meta.csv"
+.pc_cols <- c(
+  "PC1_build", "PC2_build", "PC3_build", "PC4_build",
+  "PC1_pmbb", "PC2_pmbb", "PC3_pmbb", "PC4_pmbb"
+)
+.meta_need <- c("IID", "STATUS", "AncGroup", .pc_cols)
+if (!file.exists(.sample_meta_fp)) stop("Missing required file: ", .sample_meta_fp)
+if (nrow(report_chek2_carriers) == 0L) {
+  stop("CHEK2 carrier table is empty: ", .pre_chek2_carr_fp)
+}
+
+sample_meta <- read_csv(.sample_meta_fp, show_col_types = FALSE)
+.meta_miss <- setdiff(.meta_need, names(sample_meta))
+if (length(.meta_miss)) {
+  stop("sample_meta.csv missing columns: ", paste(.meta_miss, collapse = ", "))
+}
+
+carr_iids <- report_chek2_carriers %>%
+  mutate(IID = as.character(IID)) %>%
+  distinct(IID)
+
+meta <- sample_meta %>%
+  mutate(
+    IID = as.character(IID),
+    STATUS = as.integer(STATUS),
+    Status = ifelse(STATUS == 1L, "Case", "Control"),
+    AncGroup = as.character(AncGroup),
+    across(all_of(.pc_cols), as.numeric)
+  ) %>%
+  select(all_of(.meta_need), Status)
+
+plot_df <- carr_iids %>% left_join(meta, by = "IID")
+
+missing_meta <- plot_df$IID[is.na(plot_df$STATUS)]
+missing_pcs <- plot_df$IID[
+  !is.na(plot_df$STATUS) &
+    (is.na(plot_df$PC1_build) | is.na(plot_df$PC1_pmbb))
+]
+if (length(missing_meta)) {
+  stop(
+    length(missing_meta), " CHEK2 carrier IID(s) not in sample_meta.csv. Examples: ",
+    paste(head(missing_meta, 10), collapse = ", ")
+  )
+}
+if (length(missing_pcs)) {
+  stop(
+    length(missing_pcs), " CHEK2 carrier IID(s) are in sample_meta.csv but PC1_build and/or PC1_pmbb is NA. ",
+    "Those samples were likely missing from a PC source when sample_meta was built. Examples: ",
+    paste(head(missing_pcs, 10), collapse = ", ")
+  )
+}
+if (!any(nzchar(trimws(plot_df$AncGroup[!is.na(plot_df$AncGroup)])))) {
+  stop("CHEK2 carriers have no AncGroup labels in sample_meta.csv")
+}
+
+cat(sprintf(
+  "CHEK2 carriers in `sample_meta.csv`: **%d** (%d cases, %d controls).\n\n",
+  nrow(plot_df),
+  sum(plot_df$STATUS == 1L, na.rm = TRUE),
+  sum(plot_df$STATUS == 0L, na.rm = TRUE)
+))
+cat(sprintf(
+  "Unique PC values among carriers — build: PC1=%d PC2=%d; pmbb: PC1=%d PC2=%d.\n\n",
+  dplyr::n_distinct(plot_df$PC1_build), dplyr::n_distinct(plot_df$PC2_build),
+  dplyr::n_distinct(plot_df$PC1_pmbb), dplyr::n_distinct(plot_df$PC2_pmbb)
+))
+if (dplyr::n_distinct(plot_df$PC1_pmbb) < max(5L, floor(nrow(plot_df) / 5))) {
+  cat(paste0(
+    "_Note: `PC*_pmbb` look heavily rounded/quantized (few unique PC1 values), ",
+    "which produces vertical stacks. Re-export PMBB PCs with more decimal places if available._\n\n"
+  ))
+}
+
+.plot_chek2_pcs <- function(df, x, y, color_col, title, xlab, ylab) {
+  ggplot(df, aes(x = .data[[x]], y = .data[[y]], color = .data[[color_col]])) +
+    geom_point(size = 2.4, alpha = 0.85) +
+    labs(title = title, x = xlab, y = ylab, color = NULL) +
+    theme(legend.position = "bottom")
+}
+
+# Build PCs
+print(.plot_chek2_pcs(plot_df, "PC1_build", "PC2_build", "Status",
+                      "CHEK2: PC1_build vs PC2_build (case / control)", "PC1_build", "PC2_build") +
+        scale_color_manual(values = c(Case = "#c0392b", Control = "#2980b9")))
+print(.plot_chek2_pcs(plot_df, "PC3_build", "PC4_build", "Status",
+                      "CHEK2: PC3_build vs PC4_build (case / control)", "PC3_build", "PC4_build") +
+        scale_color_manual(values = c(Case = "#c0392b", Control = "#2980b9")))
+print(.plot_chek2_pcs(plot_df, "PC1_build", "PC2_build", "AncGroup",
+                      "CHEK2: PC1_build vs PC2_build (AncGroup)", "PC1_build", "PC2_build"))
+print(.plot_chek2_pcs(plot_df, "PC3_build", "PC4_build", "AncGroup",
+                      "CHEK2: PC3_build vs PC4_build (AncGroup)", "PC3_build", "PC4_build"))
+
+# PMBB PCs
+print(.plot_chek2_pcs(plot_df, "PC1_pmbb", "PC2_pmbb", "Status",
+                      "CHEK2: PC1_pmbb vs PC2_pmbb (case / control)", "PC1_pmbb", "PC2_pmbb") +
+        scale_color_manual(values = c(Case = "#c0392b", Control = "#2980b9")))
+print(.plot_chek2_pcs(plot_df, "PC3_pmbb", "PC4_pmbb", "Status",
+                      "CHEK2: PC3_pmbb vs PC4_pmbb (case / control)", "PC3_pmbb", "PC4_pmbb") +
+        scale_color_manual(values = c(Case = "#c0392b", Control = "#2980b9")))
+print(.plot_chek2_pcs(plot_df, "PC1_pmbb", "PC2_pmbb", "AncGroup",
+                      "CHEK2: PC1_pmbb vs PC2_pmbb (AncGroup)", "PC1_pmbb", "PC2_pmbb"))
+print(.plot_chek2_pcs(plot_df, "PC3_pmbb", "PC4_pmbb", "AncGroup",
+                      "CHEK2: PC3_pmbb vs PC4_pmbb (AncGroup)", "PC3_pmbb", "PC4_pmbb"))
+```
+
+### SKAT and SKATO — non-directional supporting tests (no OR)
+
+These tests ask whether rare variants in a gene associate with disease **without** assuming a shared effect direction. Mixed risk/protective effects can still produce a small p-value. **There is no signed BETA/OR to interpret as risk vs protective** — use ADD burden for direction.
+
+FDR (`PVAL_ADJ`) here is Benjamini–Hochberg among SKAT+SKATO rows only.
+
+**Cases/Controls** = unique samples carrying ≥1 variant in that gene’s mask snplist (same definition as ADD top-gene tables). REGENIE’s own `N_CASES`/`N_CONTROLS` are cohort sizes in the model (nearly constant) and are not shown.
 
 ```{r gene-based-skat-skato-top, echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
 .fmt_small_p <- function(x) {
@@ -685,46 +1391,41 @@ SKAT and SKATO test whether rare variants in a gene are associated with disease 
   )
 }
 
-skat_skato <- gene_based_all %>%
-  dplyr::filter(TEST %in% c("ADD-SKAT", "ADD-SKATO")) %>%
-  dplyr::arrange(PVAL_ADJ, PVAL) %>%
-  dplyr::slice_head(n = 30L) %>%
-  dplyr::select(
-    GENE, TEST, MASK, THRESH,
-    PVAL, PVAL_ADJ, LOG10P,
-    N_CASES, N_CONTROLS,
-    A1FREQ_CASES, A1FREQ_CONTROLS
-  )
+if (!is.null(report_top_skat) && nrow(report_top_skat) > 0) {
+  skat_skato <- report_top_skat %>%
+    arrange(PVAL_ADJ, desc(LOG10P)) %>%
+    slice_head(n = 30L) %>%
+    select(any_of(c("GENE", "TEST", "MASK", "THRESH", "PVAL", "PVAL_ADJ", "LOG10P")))
+} else {
+  skat_skato <- gene_based_skat %>%
+    arrange(PVAL_ADJ, PVAL) %>%
+    slice_head(n = 30L) %>%
+    select(GENE, TEST, MASK, THRESH, PVAL, PVAL_ADJ, LOG10P)
+}
 
 if (nrow(skat_skato) == 0L) {
   cat("_No SKAT/SKATO rows found (`TEST` in `ADD-SKAT`, `ADD-SKATO`). Confirm gene-based Step 2 outputs include those tests._\n")
 } else {
   skat_view <- skat_skato %>%
-    dplyr::mutate(
+    .join_gene_carriers() %>%
+    mutate(
       PVAL = .fmt_small_p(PVAL),
       PVAL_ADJ = .fmt_small_p(PVAL_ADJ)
-    )
+    ) %>%
+    select(GENE, TEST, MASK, THRESH, Cases, Controls, PVAL, PVAL_ADJ, LOG10P)
 
   knitr::kable(
     skat_view,
     format = "html",
     digits = 4,
     col.names = c(
-      "Gene", "Test", "Mask", "MAF filter",
-      "P-value", "FDR P-value", "−log10(P)",
-      "N cases", "N controls",
-      "A1 freq (cases)", "A1 freq (controls)"
+      "Gene", "Test", "Mask", "MAF filter", "Cases", "Controls",
+      "P-value", "FDR P-value", "−log10(P)"
     ),
-    caption = "Top SKAT/SKATO signals ranked by FDR (PVAL_ADJ). No directionality is implied."
+    caption = "Top SKAT/SKATO signals (FDR within SKAT+SKATO only). Cases/Controls = unique mask carriers. No OR."
   ) %>%
-    kableExtra::kable_styling(
-      full_width = TRUE,
-      bootstrap_options = c("striped", "hover", "condensed"),
-      font_size = 11
-    ) %>%
-    kableExtra::column_spec(1, bold = TRUE) %>%
-    kableExtra::column_spec(c(5, 6, 7), extra_css = "white-space: nowrap;") %>%
-    kableExtra::scroll_box(width = "100%", height = "480px") %>%
+    .style_report_kable(font_size = 12, full_width = TRUE, gene_col = 1L, scroll_h = "480px") %>%
+    kableExtra::column_spec(c(7, 8, 9), extra_css = "white-space: nowrap;") %>%
     print()
 }
 ```
@@ -737,16 +1438,16 @@ if (nrow(skat_skato) == 0L) {
 risk_genes <- gene_based_add %>%
   filter(PVAL_ADJ < 0.05, BETA > 0) %>%
   select(GENE, MASK, THRESH, BETA, PVAL_ADJ) %>%
-  arrange(PVAL_ADJ)
+  arrange(PVAL_ADJ) %>%
+  .join_gene_carriers() %>%
+  select(GENE, MASK, THRESH, Cases, Controls, BETA, PVAL_ADJ)
 
 if(nrow(risk_genes) > 0) {
     kable(risk_genes,
           format = "html", digits = 4,
-          col.names = c("Gene", "Mask", "MAF Filter", "Beta", "FDR P-value")) %>%
-      kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
-                    font_size = 13) %>%
-      column_spec(1, bold = TRUE) %>%
-      column_spec(c(4, 5), color = "red")
+          col.names = c("Gene", "Mask", "MAF Filter", "Cases", "Controls", "Beta", "FDR P-value")) %>%
+      .style_report_kable(font_size = 12, full_width = FALSE, gene_col = 1L) %>%
+      column_spec(c(6, 7), color = "red")
 } else {
     cat("No risk-increasing gene associations found")
 }
@@ -758,16 +1459,16 @@ if(nrow(risk_genes) > 0) {
 protective_genes <- gene_based_add %>%
   filter(PVAL_ADJ < 0.05, BETA < 0) %>%
   select(GENE, MASK, THRESH, BETA, PVAL_ADJ) %>%
-  arrange(PVAL_ADJ)
+  arrange(PVAL_ADJ) %>%
+  .join_gene_carriers() %>%
+  select(GENE, MASK, THRESH, Cases, Controls, BETA, PVAL_ADJ)
 
 if(nrow(protective_genes) > 0) {
     kable(protective_genes,
           format = "html", digits = 4,
-          col.names = c("Gene", "Mask", "MAF Filter", "Beta", "FDR P-value")) %>%
-      kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover"),
-                    font_size = 13) %>%
-      column_spec(1, bold = TRUE) %>%
-      column_spec(c(4, 5), color = "steelblue")
+          col.names = c("Gene", "Mask", "MAF Filter", "Cases", "Controls", "Beta", "FDR P-value")) %>%
+      .style_report_kable(font_size = 12, full_width = FALSE, gene_col = 1L) %>%
+      column_spec(c(6, 7), color = "steelblue")
 } else {
     cat("No protective gene associations found")
 }
@@ -783,28 +1484,40 @@ cat("**All single variant results saved to:** `", single_file, "`\n\n")
 
 gene_file_all <- paste0(params$project_name, "_gene_based_results_alltests_", date_stamp, ".csv")
 gene_file_add <- paste0(params$project_name, "_gene_based_results_ADDonly_", date_stamp, ".csv")
+gene_file_skat <- paste0(params$project_name, "_gene_based_results_SKAT_SKATO_", date_stamp, ".csv")
 gene_meta_fp <- paste0(params$project_name, "_gene_based_meta_input_", date_stamp, ".csv")
 write_csv(gene_based_all, gene_file_all)
 write_csv(gene_based_add, gene_file_add)
+
+# SKAT/SKATO export: p/FDR only — omit BETA/SE/OR so direction cannot be misread
+skat_export_cols <- c(
+  "CHROM", "GENPOS", "ID", "GENE", "TEST", "MASK", "THRESH",
+  "LOG10P", "PVAL", "PVAL_ADJ", "LOG10P_ADJ",
+  "N", "N_CASES", "N_CONTROLS",
+  "A1FREQ", "A1FREQ_CASES", "A1FREQ_CONTROLS"
+)
+skat_export <- gene_based_skat %>% select(any_of(skat_export_cols))
+write_csv(skat_export, gene_file_skat)
 
 meta_cols <- c("GENE", "MASK", "THRESH", "TEST", "BETA", "SE", "PVAL", "N_CASES", "N_CONTROLS", "A1FREQ_CASES", "A1FREQ_CONTROLS")
 gene_meta_input <- gene_based_all %>% select(any_of(meta_cols))
 write_csv(gene_meta_input, gene_meta_fp)
 
 cat("**Gene-based REGENIE tables:**\n\n")
-cat("- **All tests:** `", gene_file_all, "`\n")
-cat("- **ADD only (burden):** `", gene_file_add, "`\n")
-cat("- **Meta input (columns for downstream meta):** `", gene_meta_fp, "`\n\n")
+cat("- **All tests (archive):** `", gene_file_all, "`\n")
+cat("- **ADD only (burden / direction):** `", gene_file_add, "`\n")
+cat("- **SKAT/SKATO only (non-directional; no BETA/OR):** `", gene_file_skat, "`\n")
+cat("- **Meta input:** `", gene_meta_fp, "`\n\n")
 
 write_csv(
-  dplyr::filter(gene_based_all, GENE == "CHEK2"),
-  paste0(params$project_name, "_CHEK2_alltests_", date_stamp, ".csv")
+  dplyr::filter(gene_based_all, GENE == "CHEK2", MASK == "M1"),
+  paste0(params$project_name, "_CHEK2_M1_alltests_", date_stamp, ".csv")
 )
 write_csv(
-  dplyr::filter(gene_based_add, GENE == "CHEK2"),
-  paste0(params$project_name, "_CHEK2_ADDonly_", date_stamp, ".csv")
+  dplyr::filter(gene_based_add, GENE == "CHEK2", MASK == "M1"),
+  paste0(params$project_name, "_CHEK2_M1_ADDonly_", date_stamp, ".csv")
 )
-cat("**CHEK2 quick extracts:** `", params$project_name, "_CHEK2_alltests_", date_stamp, ".csv` and `", params$project_name, "_CHEK2_ADDonly_", date_stamp, ".csv`\n\n")
+cat("**CHEK2 M1 quick extracts:** `", params$project_name, "_CHEK2_M1_alltests_", date_stamp, ".csv` and `", params$project_name, "_CHEK2_M1_ADDonly_", date_stamp, ".csv`\n\n")
 
 top_gene_signals <- gene_based_add %>%
   filter(PVAL_ADJ < 0.05) %>%
@@ -829,8 +1542,126 @@ if(exists("suggestive_genes") && nrow(suggestive_genes) > 0) {
     cat("**No suggestive ADD-only gene associations found**\n\n")
 }
 
+if (!is.null(report_top_genes) && nrow(report_top_genes) > 0) {
+  topgene_csv <- report_top_genes %>%
+    filter(THRESH %in% CSV_THRESH) %>%
+    arrange(MASK, THRESH, rank)
+} else {
+  topgene_csv_list <- list()
+  for (m in c("M1", "M2", "M3", "M4")) {
+    for (th in CSV_THRESH) {
+      tg20 <- top_genes_for(m, th, n = 20L)
+      if (nrow(tg20) > 0) {
+        tg20$MASK <- m
+        tg20$THRESH <- th
+        topgene_csv_list[[paste(m, th, "genes")]] <- tg20
+      }
+    }
+  }
+  topgene_csv <- if (length(topgene_csv_list)) bind_rows(topgene_csv_list) %>% relocate(MASK, THRESH) else tibble()
+}
+if (nrow(topgene_csv) > 0) {
+  topgene_fp <- paste0(params$project_name, "_top_genes_ADDonly_", date_stamp, ".csv")
+  write_csv(topgene_csv, topgene_fp)
+  cat("**Top 20 genes per mask×bin (ADD):** `", topgene_fp, "`\n\n", sep = "")
+}
+
+if (!is.null(report_contrib) && nrow(report_contrib) > 0) {
+  contrib_all <- report_contrib %>% filter(THRESH %in% CSV_THRESH)
+} else {
+  contrib_list <- list()
+  for (m in c("M1", "M2", "M3", "M4")) {
+    for (th in CSV_THRESH) {
+      t <- contrib_table(m, th, n = 20L)
+      if (nrow(t) > 0) {
+        t$MASK <- m
+        t$THRESH <- th
+        contrib_list[[paste(m, th)]] <- t
+      }
+    }
+  }
+  contrib_all <- if (length(contrib_list)) bind_rows(contrib_list) %>% relocate(MASK, THRESH) else tibble()
+}
+if (nrow(contrib_all) > 0) {
+  contrib_fp <- paste0(params$project_name, "_variant_contributions_topgenes_", date_stamp, ".csv")
+  write_csv(contrib_all, contrib_fp)
+  cat("**Mask variants for top 20 genes (snplist×annot):** `", contrib_fp, "`\n\n", sep = "")
+}
+
 cat("**Analysis completed on:**", format(Sys.time(), "%Y-%m-%d %H:%M:%S"))
 ```
+
+## Appendix: `--minMAC` — single-variant vs gene-based
+
+This run uses **`--minMAC 1`** in both Step 2 single-variant and Step 2 gene-based (**REGENIE’s default is 5**; earlier comparison runs used **10**). The flag does **not** mean the same thing in both analyses.
+
+### Single-variant Step 2
+
+- `--minMAC` filters **each tested site**.
+- With `--minMAC 10`, sites with MAC &lt; 10 are **not tested** and do not appear in the single-variant `.regenie` files.
+- With `--minMAC 1`, almost every polymorphic site is tested (only monomorphic / MAC 0 drop out).
+- Effect on the report: many more ultra-rare tests → noisier QQ / higher genomic inflation (λ). That is expected; it does not by itself mean the null model is broken.
+- SPA / Firth approximations are also less well calibrated for MAC ≲ 5–10, so some extra inflation under `--minMAC 1` is expected.
+
+### Gene-based Step 2 (burden / SKAT / SKATO)
+
+- Individual rare sites are still allowed into masks (AAF bins / singleton bin decide **which** sites enter which mask).
+- `--minMAC` then filters the **collapsed mask genotype**, not each constituent variant.
+- REGENIE’s log wording is along the lines of: masks with MAC below the threshold are ignored.
+- A gene can still be tested even if every site in the mask is a singleton or doubleton, as long as the finished mask (the number of samples carrying at least one qualifying variant) has MAC ≥ `--minMAC`.
+
+**Practical example of the confusion:** people count “4 case carriers + 1 control carrier” across several ultra-rare sites in a gene and ask why that gene appears when they are thinking “minMAC 10 per variant.” Answer: gene-based minMAC is on the **mask**, and those carriers can accumulate across different rare sites. Single-variant minMAC 10 would have dropped each of those sites from the per-site GWAS, but they can still contribute to the gene mask.
+
+### Related knobs (not the same as minMAC)
+
+| Knob | Role |
+|------|------|
+| `--aaf-bins` | Upper AAF cutoffs for building separate masks (e.g. 0.01, 0.001, 0.0001). |
+| **singleton** mask | Separate burden of MAC=1 sites (REGENIE always builds this with aaf-bins). **Not** the same as single-variant GWAS. |
+| `--build-mask max` | How dosages collapse across sites in a gene (max ALT across sites per sample). |
+| `--vc-tests skat,skato` | Extra non-directional tests on the same masks; no OR / direction. |
+| `--vc-MACthr` | **Different** from `--minMAC`. Default **10**. See below. |
+
+### `--vc-MACthr` (SKAT-family only — we have not changed this)
+
+REGENIE default is **`--vc-MACthr 10`**. Our runs leave that default alone.
+
+It applies **only** when `--vc-tests` runs SKAT / SKATO / ACAT-type tests. It does **not** change the ADD burden test (`TEST == ADD`), which already collapses every site in the mask via `--build-mask`.
+
+**What it does (REGENIE docs):**  
+Within each gene mask for a VC test, ultra-rare sites with **MAC ≤ `--vc-MACthr`** are **collapsed into one internal burden component**. That single collapsed genotype is what enters the SKAT/ACAT machinery **instead of** treating each ultra-rare site as its own term. Sites with MAC above the threshold stay as individual contributors to the VC test.
+
+**Default 10 means:** under the default of 10, nearly all sites in a typical rare-variant mask are collapsed into one internal component before SKAT is run. SKAT therefore sees mostly that one aggregate rare-burden term plus any less-rare sites that remain.
+
+**Lowering `--vc-MACthr` (e.g. toward 1):**  
+- Fewer sites qualify as “ultra-rare” for collapsing.  
+- More individual rare variants enter SKAT as separate terms.  
+- SKAT becomes more “per-site variance” and less dependent on a single collapsed ultra-rare component.  
+- Can change which genes look strong on SKAT/SKATO **without** changing ADD results.  
+- Same calibration caveat as low-MAC singles: very rare per-site terms are noisy.
+
+**Raising `--vc-MACthr`:**  
+- More collapsing into the single collapsed ultra-rare component.  
+- SKAT leans even more on one aggregate rare-burden direction within the VC model.
+
+**If the goal is to retain ultra-rare signal in the gene-based results:**
+
+| Knob | What it filters / collapses | Affects ADD? | Affects SKAT/SKATO? |
+|------|------------------------------|--------------|---------------------|
+| `--minMAC` (gene-based) | Finished **mask** MAC (test or drop the whole mask) | Yes | Yes (whether that mask is tested at all) |
+| `--minMAC` (single-variant) | Each **site** | N/A | N/A |
+| `--vc-MACthr` | Inside a VC test: which **sites** are collapsed into an ultra-rare component vs kept separate | **No** | **Yes** |
+
+- `--minMAC` controls whether a low-MAC mask is tested at all (affects both ADD and SKAT).
+- `--vc-MACthr` only changes how SKAT treats the rare sites inside a mask that already passed the minMAC filter. It does not alter ADD results and does not affect single-variant inflation.
+- We left `--vc-MACthr` at its default of 10. SKAT results therefore reflect the software’s standard collapsing behavior.
+
+### What “Cases / Controls” mean in this report
+
+- **Gene tables** (top ADD, suggestive, SKAT, risk/protective): unique samples carrying ≥1 variant in that gene×mask×bin snplist (from `*.report.gene_carriers.tsv`).
+- **Variant tables** (mask contrib, CHEK2 sites): per-site carriers from `mask_variant_stats.tsv` when available.
+- **Single-variant hits:** prefer mask-stats carriers; if missing (site not in the LoF/syn mask-stats set), approximate alt allele count from REGENIE `--af-cc` (`A1FREQ × 2 × N`), which for rare hets is ≈ carrier count.
+- REGENIE’s own `N_CASES` / `N_CONTROLS` columns are **cohort sizes in the model** (nearly constant) — not “how many people carry the variant,” so we do not use those as the collaborator-facing carrier columns.
 
 ## Appendix: REGENIE pipeline flowchart
 

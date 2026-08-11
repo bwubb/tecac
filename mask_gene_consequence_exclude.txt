@@ -1,0 +1,6 @@
+# Gene × consequence exclusions for REGENIE mask annotation (preprocess_regenie).
+# Format: GENE<TAB>CONSEQUENCE_SUBSTRING
+# Match is case-insensitive; CONSEQUENCE_SUBSTRING must appear in Variant.Consequence
+# (compound VEP terms like missense_variant&splice_region_variant still match).
+# Lines starting with # are ignored.
+CHEK2	missense_variant

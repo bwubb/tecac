@@ -13,19 +13,6 @@ import datetime
 
 DATE=datetime.date.today().strftime('%Y%m%d')
 
-# Read-check CSV for filter_mnp_pass_by_read_check. Optional sidestep: set input.mnp in config
-# to an existing results file; otherwise use output from check_mnp_reads.
-MNP_READ_CHECK=config.get("input",{}).get("mnp") or "data/mnp/mnp_read_check.results.mapq20.csv"
-# minimal: one read-check per MNP (greedy BAM set); pair-level filter.
-# all_cases: read-check every (MNP, case) PASS row; per-sample filter.
-MNP_READ_CHECK_MODE=config.get("mnp",{}).get("read_check_mode","minimal")
-MNP_ALL_CARRIERS="--all-carriers" if MNP_READ_CHECK_MODE=="all_cases" else ""
-MNP_FILTER_PER_SAMPLE="--per-sample" if MNP_READ_CHECK_MODE=="all_cases" else ""
-MNP_CASE_LIST=config.get("input",{}).get("cases","case.list")
-# set_cover: one BAM per MNP (minimal); all_cases: every case carrier per MNP (default)
-MNP_READ_CHECK_MODE=config.get("mnp",{}).get("read_check_mode","all_cases")
-MNP_PAIR_RULE=config.get("mnp",{}).get("pair_rule","any")
-
 
 # Target: same outputs as mnp for GT/VEP handoff, but the DAG does not require assignments/samples.
 # Put read-check outputs in place yourself (same paths as rule check_mnp_reads) so that rule is skipped.
@@ -34,7 +21,8 @@ rule mnp_gt_for_downstream:
         ids=expand("data/mnp/chr{CHR}.mnp_sample_info.read_check_filtered.PASS.id",CHR=range(1,23)),
         bcf=expand("data/mnp/chr{CHR}.mnp.pass.gt.sorted.bcf",CHR=range(1,23)),
         vep_vcf=expand("data/mnp/chr{CHR}.mnp.pass.no_sample.sorted.vep.vcf",CHR=range(1,23)),
-        vep_bcf=expand("data/mnp/chr{CHR}.mnp.pass.no_sample.sorted.vep.bcf",CHR=range(1,23))
+        vep_bcf=expand("data/mnp/chr{CHR}.mnp.pass.no_sample.sorted.vep.bcf",CHR=range(1,23)),
+        metrics="data/mnp/mnp.validation.metrics.tsv",
 
 
 # Stop here before samtools read validation (check_mnp_reads).
@@ -107,7 +95,7 @@ rule test_mnp_sample_info:
         pass_out="data/mnp/chr{CHR}.mnp_sample_info.PASS.txt",
         fail_out="data/mnp/chr{CHR}.mnp_sample_info.FAIL.txt"
     params:
-        sample_list=MNP_CASE_LIST
+        sample_list=config.get("input",{}).get("cases","case.list")
     shell:
         "python test_mnp_sample_info.py -p {input.pairs} -i {input.sample_info} -o {output.pass_out} -f {output.fail_out} --sample-list {params.sample_list} --min-samples 1"
 
@@ -119,13 +107,9 @@ rule choose_mnp_read_check_samples:
         assignments="data/mnp/mnp_read_check.assignments.tsv",
         samples="data/mnp/mnp_read_check.samples.txt",
     params:
-        case_list=MNP_CASE_LIST,
-        mode=MNP_READ_CHECK_MODE,
-        # set_cover (minimal BAMs): --mode set_cover  (drop --case-list)
+        case_list=config.get("input",{}).get("cases","case.list")
     shell:
-        "python choose_mnp_read_check_samples.py {input.pass_files} "
-        "-o {output.assignments} -s {output.samples} "
-        "--mode {params.mode} --case-list {params.case_list}"
+        "python choose_mnp_read_check_samples.py {input.pass_files} -o {output.assignments} -s {output.samples} --case-list {params.case_list}"
 
 rule check_mnp_reads:
     input:
@@ -147,22 +131,36 @@ rule check_mnp_reads:
         "-o {output.csv} "
         "--read-details-tsv {output.read_details}"
 
+## NOTE: this is a sidestep to get the read-check results from the config file.
+## Didnt feel like figureing out how to make a split branch for this.
+## Sidestep (reuse existing results): read_check=config["input"]["mnp"],
+## Run check_mnp_reads again: read_check="data/mnp/mnp_read_check.results.mapq20.csv",
 rule filter_mnp_pass_by_read_check:
     input:
         pass_in="data/mnp/chr{CHR}.mnp_sample_info.PASS.txt",
-        read_check=MNP_READ_CHECK,
-    params:
-        pair_rule=MNP_PAIR_RULE,
+        read_check="data/mnp/mnp_read_check.results.mapq20.csv",
+        #read_check=config["input"]["mnp"],
+        #replace with "data/mnp/mnp_read_check.results.mapq20.csv" to run it again.
     output:
         pass_out="data/mnp/chr{CHR}.mnp_sample_info.read_check_filtered.PASS.txt",
         ids_out="data/mnp/chr{CHR}.mnp_sample_info.read_check_filtered.PASS.id"
+    params:
+        # per_sample: only keep (pair,sample) rows that were CRAM-validated Strong_Cis,
+        # so GT is rewritten only for samples we actually checked. Set false for legacy
+        # pair-level behavior (any carrier passing keeps the whole pair).
+        per_sample="--per-sample" if config.get("mnp",{}).get("per_sample",True) else "",
+        # target_mnps: restrict MNP creation to pairs in this TSV (id1,id2 cols), e.g.
+        # cohort AAF <= cutoff from mnp_carrier_stats.py --targets-out. Avoids making MNP
+        # records (with unvalidated controls) for common pairs. Empty = no restriction.
+        target_mnps=("--target-mnps "+config["mnp"]["target_mnps"]) if config.get("mnp",{}).get("target_mnps") else ""
     shell:
         "python filter_mnp_pass_by_read_check.py "
         "-r {input.read_check} "
         "-i {input.pass_in} "
         "-o {output.pass_out} "
         "--ids-out {output.ids_out} "
-        "--pair-rule {params.pair_rule}"
+        "{params.per_sample} "
+        "{params.target_mnps}"
 
 rule plan_mnp_gt:
     input:

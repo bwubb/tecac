@@ -14,9 +14,9 @@ CARRIER_FISHER_P_THR=1e-4
 
 rule rare_variant_qc:
     input:
-        f"data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.{DATE}.html",
-        "data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.all.tsv",
-        "data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.flagged.tsv",
+        f"data/qc/rare_variant/rv-qc.freeze_pairwise.{DATE}.html",
+        "data/qc/rare_variant/rv-qc.freeze_pairwise.all.tsv",
+        "data/qc/rare_variant/rv-qc.freeze_pairwise.flagged.tsv",
         "data/qc/exclusions/rare_variant_exclusions.txt",
 
 rule rare_variant_qc_extract_per_chr:
@@ -33,12 +33,11 @@ rule rare_variant_qc_extract_per_chr:
         """
         mkdir -p data/qc/rare_variant
         # covariates: FID IID FREEZE STATUS; controls STATUS==1.passing_samples: IID per line OR FID IID;register both FID and IID for membership (match covariates IID col2).
-        awk 'BEGIN{{FS="[ \t]+";OFS="\\t"}} NR==FNR{{if(NR==1 && ((NF>=2 && $1 ~ /^#?FID$/ && $2 ~ /^#?IID$/) || (NF==1 && $1 ~ /^#?IID$/)))next;if(NF>=2){{pass[$1]=1;pass[$2]=1}}else if($1!="")pass[$1]=1;next}} FNR==1{{next}} {{gsub(/\\r/,"",$2);gsub(/\\r/,"",$3);gsub(/\\r/,"",$4);if(($2 in pass) && ($4=="1") && (($3=="2") || ($3=="3")))print $2,$3}}' {input.samples} {params.covariates} > {output.sample_freeze}
+        awk 'BEGIN{{FS="[ \t]+";OFS="\\t"}} NR==FNR{{if(NR==1 && ((NF>=2 && $1 ~ /^#?FID$/ && $2 ~ /^#?IID$/) || (NF==1 && $1 ~ /^#?IID$/)))next;if(NF>=2){{pass[$1]=1;pass[$2]=1}}else if($1!="")pass[$1]=1;next}} FNR==1{{next}} {{gsub(/\\r/,"",$2);gsub(/\\r/,"",$3);gsub(/\\r/,"",$4);if(($2 in pass) && ($4=="1"))print $2,$3}}' {input.samples} {params.covariates} > {output.sample_freeze}
         test -s {output.sample_freeze}
         echo "Controls written: $(wc -l < {output.sample_freeze})"
-        echo "Freeze 2 controls: $(awk 'BEGIN{{FS=\"\\t\"}} $2==\"2\"{{c++}} END{{print c+0}}' {output.sample_freeze})"
-        echo "Freeze 3 controls: $(awk 'BEGIN{{FS=\"\\t\"}} $2==\"3\"{{c++}} END{{print c+0}}' {output.sample_freeze})"
-        awk 'BEGIN{{FS="\\t"}} $2=="2"{{c2++}} $2=="3"{{c3++}} END{{if((c2+0)==0 || (c3+0)==0){{print "ERROR: freeze split invalid in sample_freeze.tsv (freeze2=" (c2+0) ", freeze3=" (c3+0) ")" > "/dev/stderr"; exit 1}}}}' {output.sample_freeze}
+        echo "Controls per freeze:"; awk 'BEGIN{{FS="\\t"}} {{c[$2]++}} END{{for(f in c) print "  freeze "f": "c[f]}}' {output.sample_freeze}
+        awk 'BEGIN{{FS="\\t"}} {{c[$2]=1}} END{{n=0;for(f in c)n++;if(n<2){{print "ERROR: need >=2 freeze groups in controls; found "n > "/dev/stderr"; exit 1}}}}' {output.sample_freeze}
         awk 'BEGIN{{FS="\\t"}} {{print $1}}' {output.sample_freeze} > {output.sample_order}.tmp
         test -s {output.sample_order}.tmp
         bcftools query -l -S {output.sample_order}.tmp {input.bcf} > {output.sample_order}
@@ -74,9 +73,9 @@ rule rare_variant_qc_report:
         expand("data/qc/rare_variant/chr{CHR}.rv-qc.tsv",CHR=CHROMOSOMES_AUTOSOMAL),
         pathogenic="data/preprocess/pathogenic_vus.csv",
     output:
-        html=f"data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.{DATE}.html",
-        all="data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.all.tsv",
-        flagged="data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.flagged.tsv",
+        html=f"data/qc/rare_variant/rv-qc.freeze_pairwise.{DATE}.html",
+        all="data/qc/rare_variant/rv-qc.freeze_pairwise.all.tsv",
+        flagged="data/qc/rare_variant/rv-qc.freeze_pairwise.flagged.tsv",
     shell:
         """
         Rscript -e "rmarkdown::render('rare_variant_qc.Rmd',output_file='{output.html}')"

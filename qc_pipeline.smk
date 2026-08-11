@@ -1,6 +1,6 @@
 #needs exwas_qc_report2.Rmd
 
-#include: "select_variants3.smk"
+include: "select_variants3.smk"
 include: "build_files.smk"
 include: "annotation_files3.smk"
 
@@ -25,14 +25,14 @@ wildcard_constraints:
 rule qc_report:
     input:
         f"exwas_qc_report.{DATE}.html",
-        #f"data/qc/rare_variant/rv-qc.freeze2_vs_freeze3.{DATE}.html",
-#rename this rv-wc html and drop freeze2,3 shit from the file names.
+        f"data/qc/rare_variant/rv-qc.freeze_pairwise.{DATE}.html",
 
 rule finalize:
     input:
         expand("data/final/chr{CHR}.annotation.no_sample.vep.bcf",CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/final/chr{CHR}.annotation.no_sample.vep.report.csv",CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/final/chr{CHR}.annotation.pgen",CHR=CHROMOSOMES_AUTOSOMAL),
+        "data/mnp/mnp_blacklist.txt",
         "data/final/build.pgen",
         "data/final/build.eigenvec",
         "data/final/samples.txt",
@@ -51,15 +51,16 @@ rule generate_qc_report:
         het_exclusions="data/qc/exclusions/het_exclusions.txt",
         pca_eigenvec="data/preprocess/build_pca_clean.eigenvec",
         pca_eigenval="data/preprocess/build_pca_clean.eigenval",
-        prefilter_stats=expand("data/qc/reports/chr{CHR}.prefilter.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
+        prefilter_stats=expand("data/qc/reports/chr{CHR}.prefilter.variant_types.select_variants.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         postfilter_stats=expand("data/qc/reports/chr{CHR}.postfilter.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         plink_filter_metrics=expand("data/qc/reports/chr{CHR}.plink_filter_metrics.txt",CHR=CHROMOSOMES_AUTOSOMAL),
+        postplink_variant_types=expand("data/qc/reports/chr{CHR}.postplink.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         postplink_counts=expand("data/qc/reports/chr{CHR}.postplink.variant_count.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         variant_afreq=expand("data/plink/chr{CHR}.site-qc.var-qc.afreq",CHR=CHROMOSOMES_AUTOSOMAL),
         variant_vmiss=expand("data/plink/chr{CHR}.site-qc.var-qc.vmiss",CHR=CHROMOSOMES_AUTOSOMAL),
         variant_hardy=expand("data/plink/chr{CHR}.site-qc.var-qc.hardy",CHR=CHROMOSOMES_AUTOSOMAL),
         postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
-        # MNP validation metrics are optional in exwas_qc_report2.Rmd (loaded if file exists).
+        mnp_validation_metrics="data/mnp/mnp.validation.metrics.tsv",
     output:
         dated=f"exwas_qc_report.{DATE}.html",
     params:

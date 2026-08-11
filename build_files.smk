@@ -48,7 +48,7 @@ rule build_files:
         clean_eigenval="data/preprocess/build_pca_clean.eigenval",
         clean_eigenvec_var="data/preprocess/build_pca_clean.eigenvec.allele",
         prefilter_stats=expand("data/qc/reports/chr{CHR}.prefilter.variant_types.txt", CHR=CHROMOSOMES_AUTOSOMAL),
-        postfilter_stats=expand("data/qc/reports/chr{CHR}.postfilter.variant_types.txt", CHR=CHROMOSOMES_AUTOSOMAL),
+        postplink_variant_types=expand("data/qc/reports/chr{CHR}.postplink.variant_types.txt", CHR=CHROMOSOMES_AUTOSOMAL),
         postplink_counts=expand("data/qc/reports/chr{CHR}.postplink.variant_count.txt", CHR=CHROMOSOMES_AUTOSOMAL),
         plink_filter_metrics=expand("data/qc/reports/chr{CHR}.plink_filter_metrics.txt", CHR=CHROMOSOMES_AUTOSOMAL),
         variant_afreq=expand("data/plink/chr{CHR}.site-qc.var-qc.afreq", CHR=CHROMOSOMES_AUTOSOMAL),
@@ -109,16 +109,16 @@ rule count_variant_types_prefilter_build:
         awk -v out={output} '$0 !~ /^#/ && NF>=5 {{tot++; ref=length($4); alt=length($5); if(ref==1 && alt==1) snp++; else indel++}} END {{print "TOTAL", tot+0 >> out; print "SNP", snp+0 >> out; print "INDEL", indel+0 >> out; print "OTHER", 0 >> out}}' {input.pvar}
         """
 
-rule count_variant_types_postfilter_build:
+rule count_variant_types_postplink_build:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
         pvar="data/plink/chr{CHR}.site-qc.var-qc.pvar"
     output:
-        "data/qc/reports/chr{CHR}.postfilter.variant_types.txt"
+        "data/qc/reports/chr{CHR}.postplink.variant_types.txt"
     resources:
-        lsf_err="logs/lsf/count_variant_types_postfilter_build.chr{CHR}.e",
-        lsf_out="logs/lsf/count_variant_types_postfilter_build.chr{CHR}.o"
+        lsf_err="logs/lsf/count_variant_types_postplink_build.chr{CHR}.e",
+        lsf_out="logs/lsf/count_variant_types_postplink_build.chr{CHR}.o"
     shell:
         """
         echo "TYPE COUNT" > {output}
@@ -146,7 +146,9 @@ rule parse_plink_filter_metrics_build:
     wildcard_constraints:
         CHR='[0-9]+'
     input:
-        log="data/plink/chr{CHR}.site-qc.var-qc.log"
+        log="data/plink/chr{CHR}.site-qc.var-qc.log",
+        pvar_in="data/plink/chr{CHR}.site-qc.pvar",
+        pvar_out="data/plink/chr{CHR}.site-qc.var-qc.pvar"
     output:
         "data/qc/reports/chr{CHR}.plink_filter_metrics.txt"
     resources:
@@ -155,13 +157,24 @@ rule parse_plink_filter_metrics_build:
     shell:
         """
         echo "CHR FILTER VARIANTS_REMOVED" > {output}
-        GENO=$(sed -n 's/.*\\([0-9][0-9]*\\) variant(s) removed due to missing genotype data.*/\\1/p' {input.log} 2>/dev/null | head -1); GENO=${{GENO:-0}}
-        MAF=$(sed -n 's/.*\\([0-9][0-9]*\\) variant(s) removed due to allele frequency threshold.*/\\1/p' {input.log} 2>/dev/null | head -1); MAF=${{MAF:-0}}
-        HWE=$(sed -n 's/.*\\([0-9][0-9]*\\) variant(s) removed due to Hardy-Weinberg.*/\\1/p' {input.log} 2>/dev/null | head -1); HWE=${{HWE:-0}}
+        GENO=$(sed -n 's/.*\\([0-9][0-9]*\\) variants removed due to missing genotype data.*/\\1/p' {input.log} 2>/dev/null | head -1); GENO=${{GENO:-0}}
+        MAF=$(sed -n 's/.*\\([0-9][0-9]*\\) variants removed due to allele frequency threshold.*/\\1/p' {input.log} 2>/dev/null | head -1); MAF=${{MAF:-0}}
+        HWE=$(sed -n 's/.*\\([0-9][0-9]*\\) variants removed due to Hardy-Weinberg.*/\\1/p' {input.log} 2>/dev/null | head -1); HWE=${{HWE:-0}}
+        SNPS_ONLY=$(sed -n 's/.*\\([0-9][0-9]*\\) variants removed due to --snps-only.*/\\1/p' {input.log} 2>/dev/null | head -1)
+        if [ -z "$SNPS_ONLY" ]; then
+            BEFORE=$(awk '$0 !~ /^#/ && NF>=5' {input.pvar_in} | wc -l)
+            SNP_BEFORE=$(awk '$0 !~ /^#/ && NF>=5 {{ref=length($4); alt=length($5); if(ref==1 && alt==1) n++}} END{{print n+0}}' {input.pvar_in})
+            SNPS_ONLY=$((BEFORE - SNP_BEFORE))
+        fi
+        AFTER=$(awk '$0 !~ /^#/ && NF>=5' {input.pvar_out} | wc -l)
+        BEFORE=$(awk '$0 !~ /^#/ && NF>=5' {input.pvar_in} | wc -l)
+        TOTAL=$((BEFORE - AFTER))
+        echo "{wildcards.CHR} SNPS_ONLY $SNPS_ONLY" >> {output}
         echo "{wildcards.CHR} GENO $GENO" >> {output}
         echo "{wildcards.CHR} MAF $MAF" >> {output}
         echo "{wildcards.CHR} HWE $HWE" >> {output}
         echo "{wildcards.CHR} PRUNE 0" >> {output}
+        echo "{wildcards.CHR} TOTAL $TOTAL" >> {output}
         """
 
 rule plink2_freq_missing_hardy_build:

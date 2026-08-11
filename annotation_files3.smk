@@ -174,10 +174,17 @@ rule bcftools_exclude_rare_variant_qc_flags:
     output:
         bcf="data/bcftools/chr{CHR}.site-qc.het_miss.mnp.gt.rv-qc.bcf",
         vep="data/bcftools/chr{CHR}.site-qc.het_miss.no_sample.vep.mnp.rv-qc.vcf",
+    params:
+        # The exclusion list is always built (input dependency above). Whether it is
+        # actually applied is gated by config rare_variant_qc.apply_exclusions (default False),
+        # so you can flip it on later without re-running the QC. When False, variants pass
+        # through unchanged.
+        excl=lambda wildcards, input: ("-e 'ID=@%s'" % input.ids
+              if config.get("rare_variant_qc",{}).get("apply_exclusions",False) else "")
     shell:
         """
-        bcftools view -e 'ID=@{input.ids}' -Ob -W=csi -o {output.bcf} {input.bcf}
-        bcftools view -e 'ID=@{input.ids}' -Ov -o {output.vep} {input.vep}
+        bcftools view {params.excl} -Ob -W=csi -o {output.bcf} {input.bcf}
+        bcftools view {params.excl} -Ov -o {output.vep} {input.vep}
         """
 
 rule plink2_annotation_pgen:
