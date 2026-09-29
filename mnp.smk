@@ -220,7 +220,7 @@ rule annotate_mnp_gt:
         singularity run --pwd "$PWD" -B "$PWD":"$PWD" -H "$PWD":"$PWD" \
         --bind /home/bwubb/resources:/opt/vep/resources \
         --bind /home/bwubb/.vep:/opt/vep/.vep \
-        /appl/containers/vep112.sif vep \
+        /appl/containers/ensembl-vep_release_116.0.sif vep \
         --dir /opt/vep/.vep \
         -i $PWD/{input.vcf} \
         -o $PWD/{output.vcf} \

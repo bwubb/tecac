@@ -21,14 +21,42 @@
 # Main workflow provides: data/plink/chr{CHR}.site-qc.pgen, data/plink/chrX.sex_update.txt.
 # =============================================================================
 
+import os
+
 CHROMOSOMES_AUTOSOMAL=list(range(1,23))
 GENO_THR=config.get('qc',{}).get('geno_thr',0.01)
 MAF_THR=config.get('qc',{}).get('maf_thr',0.05)
 HWE_THR=config.get('qc',{}).get('hwe_thr',1e-6)
 MIND_THR=config.get('qc',{}).get('mind_thr',0.05)#0.01
+LD_THR=str(config.get('qc',{}).get('ld_thr','200 20 0.2'))
+COVARIATES=config.get('input',{}).get('covariates','covariates.txt')
+_raw_af_delta=config.get('qc',{}).get('af_delta_thr', None)
+try:
+    AF_DELTA_THR=float(_raw_af_delta) if _raw_af_delta is not None and str(_raw_af_delta).strip()!='' else 0.0
+except (TypeError, ValueError):
+    AF_DELTA_THR=0.0
+AF_DELTA_EXCLUDE='data/qc/exclusions/af_delta_exclude.snplist'
+
+def af_delta_exclude_input(wildcards=None):
+    return [AF_DELTA_EXCLUDE] if AF_DELTA_THR>0 else []
+
+def snp_id_exclude_flag(path):
+    if not path:
+        return ''
+    if not isinstance(path,str):
+        path=str(path[0]) if len(path) else ''
+    if not path or not os.path.isfile(path):
+        return ''
+    with open(path) as f:
+        for line in f:
+            s=line.strip()
+            if s and not s.startswith('#'):
+                return f'--exclude {path}'
+    return ''
 
 wildcard_constraints:
-    CHR='[0-9]+'
+    CHR='[0-9]+',
+    cohort='tecac|pmbb'
 
 
 rule build_files:
@@ -38,6 +66,9 @@ rule build_files:
         psam="data/preprocess/build.psam",
         samples="data/qc/passing_samples.txt",
         snplist="data/preprocess/build.snplist",
+        cohort_af="data/qc/reports/build_af_tecac_vs_pmbb.tsv",
+        cohort_af_zero="data/qc/reports/build_af_tecac_zero_pmbb_poly.tsv",
+        af_delta_excl=af_delta_exclude_input,
         eigenvec="data/preprocess/build_pca.eigenvec",
         eigenval="data/preprocess/build_pca.eigenval",
         eigenvec_var="data/preprocess/build_pca.eigenvec.allele",
@@ -309,7 +340,8 @@ rule plink2_ld_prune_merge_mind:
         prune_out="data/plink/merge_mind.prune.out"
     params:
         inputname="data/plink/merge_mind",
-        outputname="data/plink/merge_mind"
+        outputname="data/plink/merge_mind",
+        ld_thr=LD_THR
     resources:
         lsf_err="logs/lsf/plink2_ld_prune_merge_mind.e",
         lsf_out="logs/lsf/plink2_ld_prune_merge_mind.o"
@@ -318,7 +350,7 @@ rule plink2_ld_prune_merge_mind:
         plink2 --pfile {params.inputname} \
         --exclude range {input.long_ld} \
         --chr 1-7,9-22 \
-        --indep-pairwise 200 20 0.2 \
+        --indep-pairwise {params.ld_thr} \
         --out {params.outputname}
         """
 
@@ -384,8 +416,7 @@ rule plink2_het_outliers:
         """
 
 # -----------------------------------------------------------------------------
-# 9. Build = merge_mind minus het outliers. Final analysis dataset for REGENIE.
-#    Output: data/preprocess/build.pgen/pvar/psam, data/qc/passing_samples.txt
+# 9. Build = merge_mind minus het outliers. REGENIE step 1 file (long-LD dropped at extract).
 # -----------------------------------------------------------------------------
 rule plink2_create_build:
     input:
@@ -412,8 +443,131 @@ rule plink2_create_build:
         """
 
 # -----------------------------------------------------------------------------
-# 10. PCA on build (already het-filtered) using merge_mind.prune.in, chr 1-7,9-22, long-LD excluded (defensive).
-#     Output: build_pca.eigenvec, build_pca.eigenval (build unchanged; chr8 retained for REGENIE)
+# 9b. Build SNP AF in TECAC (FREEZE 5) vs PMBB. IDs with |AF delta| > qc.af_delta_thr
+#     go to af_delta_exclude.snplist for PCA and REGENIE step 1 (not ExWAS).
+# -----------------------------------------------------------------------------
+rule make_build_af_cohort_keeps:
+    input:
+        psam="data/preprocess/build.psam",
+        covariates=COVARIATES,
+    output:
+        tecac="data/qc/reports/build_af_cohort.tecac.keep",
+        pmbb="data/qc/reports/build_af_cohort.pmbb.keep",
+    resources:
+        lsf_err="logs/lsf/make_build_af_cohort_keeps.e",
+        lsf_out="logs/lsf/make_build_af_cohort_keeps.o",
+    shell:
+        """
+        awk 'BEGIN{{FS="[ \\t]+"; OFS="\\t"}}
+          NR==FNR {{
+            if ($0 ~ /^##/) next
+            if ($0 ~ /^#/) next
+            pass[$2]=$1
+            next
+          }}
+          FNR==1 {{ next }}
+          {{
+            iid=$2
+            if (!(iid in pass)) next
+            fz=$3
+            if (fz=="5" || fz=="5.0" || fz=="TECAC" || fz ~ /^[Ff]reeze[[:space:]]*5$/)
+              print pass[iid], iid > "{output.tecac}"
+            else
+              print pass[iid], iid > "{output.pmbb}"
+          }}' {input.psam} {input.covariates}
+        test -s {output.tecac}
+        test -s {output.pmbb}
+        """
+
+rule build_af_cohort_freq:
+    input:
+        pgen="data/preprocess/build.pgen",
+        pvar="data/preprocess/build.pvar",
+        psam="data/preprocess/build.psam",
+        keep="data/qc/reports/build_af_cohort.{cohort}.keep",
+    output:
+        afreq="data/qc/reports/build_af_cohort.{cohort}.afreq",
+        log="data/qc/reports/build_af_cohort.{cohort}.log",
+    params:
+        inputname="data/preprocess/build",
+        outputname="data/qc/reports/build_af_cohort.{cohort}",
+    resources:
+        lsf_err="logs/lsf/build_af_cohort_freq.{cohort}.e",
+        lsf_out="logs/lsf/build_af_cohort_freq.{cohort}.o",
+    shell:
+        """
+        plink2 --pfile {params.inputname} --keep {input.keep} --freq --out {params.outputname}
+        """
+
+rule build_af_tecac_vs_pmbb:
+    input:
+        tecac="data/qc/reports/build_af_cohort.tecac.afreq",
+        pmbb="data/qc/reports/build_af_cohort.pmbb.afreq",
+    output:
+        tsv="data/qc/reports/build_af_tecac_vs_pmbb.tsv",
+    resources:
+        lsf_err="logs/lsf/build_af_tecac_vs_pmbb.e",
+        lsf_out="logs/lsf/build_af_tecac_vs_pmbb.o",
+    shell:
+        """
+        awk 'BEGIN{{OFS="\\t"}}
+          FNR==NR {{
+            if ($0 ~ /^##/) next
+            if ($0 ~ /^#/) next
+            tchr[$2]=$1; tref[$2]=$3; talt[$2]=$4; taf[$2]=$5; tn[$2]=$6
+            next
+          }}
+          $0 ~ /^##/ {{ next }}
+          $0 ~ /^#/ {{
+            print "CHROM","ID","REF","ALT","AF_TECAC","OBS_TECAC","AF_PMBB","OBS_PMBB"
+            next
+          }}
+          {{
+            print ($2 in tchr ? tchr[$2] : $1), $2, $3, $4, taf[$2]+0, tn[$2]+0, $5, $6
+          }}' {input.tecac} {input.pmbb} > {output.tsv}
+        """
+
+rule build_af_tecac_zero_pmbb_poly:
+    input:
+        tsv="data/qc/reports/build_af_tecac_vs_pmbb.tsv",
+    output:
+        candidates="data/qc/reports/build_af_tecac_zero_pmbb_poly.tsv",
+    resources:
+        lsf_err="logs/lsf/build_af_tecac_zero_pmbb_poly.e",
+        lsf_out="logs/lsf/build_af_tecac_zero_pmbb_poly.o",
+    shell:
+        """
+        awk 'BEGIN{{OFS="\\t"}} NR==1 {{print; next}} $5+0==0 && $7+0>0 {{print}}' {input.tsv} > {output.candidates}
+        """
+
+rule make_af_delta_exclude_snplist:
+    input:
+        tsv="data/qc/reports/build_af_tecac_vs_pmbb.tsv",
+    output:
+        snplist=AF_DELTA_EXCLUDE,
+    params:
+        thr=AF_DELTA_THR,
+    resources:
+        lsf_err="logs/lsf/make_af_delta_exclude_snplist.e",
+        lsf_out="logs/lsf/make_af_delta_exclude_snplist.o",
+    shell:
+        """
+        if awk -v d={params.thr} 'BEGIN{{ exit !(d>0) }}'; then
+          awk -v d={params.thr} 'BEGIN{{OFS="\\t"}}
+            NR==1 {{ next }}
+            {{
+              dt=$5-$7
+              if (dt<0) dt=-dt
+              if (dt>d) print $2
+            }}' {input.tsv} > {output.snplist}
+        else
+          : > {output.snplist}
+        fi
+        """
+
+# -----------------------------------------------------------------------------
+# 10. PCA on build (prune.in, chr 1-7,9-22, long-LD --exclude range).
+#     If qc.af_delta_thr > 0, second plink2 call --exclude IDs with |AF_TECAC-AF_PMBB| > thr.
 # -----------------------------------------------------------------------------
 rule calculate_pca:
     input:
@@ -421,25 +575,38 @@ rule calculate_pca:
         pvar="data/preprocess/build.pvar",
         psam="data/preprocess/build.psam",
         pruned_snps="data/plink/merge_mind.prune.in",
-        long_ld=config.get("input", {}).get("long_ld_bed", "long_ld_regions.bed")
+        long_ld=config.get("input", {}).get("long_ld_bed", "long_ld_regions.bed"),
+        id_excl=af_delta_exclude_input,
     output:
         eigenvec="data/preprocess/build_pca.eigenvec",
         eigenvec_var="data/preprocess/build_pca.eigenvec.allele",
         eigenval="data/preprocess/build_pca.eigenval"
     params:
         inputname="data/preprocess/build",
-        outputname="data/preprocess/build_pca"
+        outputname="data/preprocess/build_pca",
+        id_excl_flag=lambda wildcards, input: snp_id_exclude_flag(input.id_excl),
     resources:
         lsf_err="logs/lsf/calculate_pca.e",
         lsf_out="logs/lsf/calculate_pca.o"
     shell:
         """
-        plink2 --pfile {params.inputname} \
-        --extract {input.pruned_snps} \
-        --exclude range {input.long_ld} \
-        --chr 1-7,9-22 \
-        --pca 20 allele-wts \
-        --out {params.outputname}
+        if [ -n "{params.id_excl_flag}" ]; then
+          plink2 --pfile {params.inputname} \
+            --extract {input.pruned_snps} \
+            --exclude range {input.long_ld} \
+            --chr 1-7,9-22 \
+            --write-snplist --out data/plink/pca_variants
+          plink2 --pfile {params.inputname} \
+            --extract data/plink/pca_variants.snplist \
+            {params.id_excl_flag} \
+            --pca 20 allele-wts --out {params.outputname}
+        else
+          plink2 --pfile {params.inputname} \
+            --extract {input.pruned_snps} \
+            --exclude range {input.long_ld} \
+            --chr 1-7,9-22 \
+            --pca 20 allele-wts --out {params.outputname}
+        fi
         """
 
 # -----------------------------------------------------------------------------
@@ -476,24 +643,38 @@ rule calculate_pca_clean:
         psam="data/preprocess/build.psam",
         pruned_snps="data/plink/merge_mind.prune.in",
         pca_outliers="data/qc/exclusions/pca_outliers.txt",
-        long_ld=config.get("input", {}).get("long_ld_bed", "long_ld_regions.bed")
+        long_ld=config.get("input", {}).get("long_ld_bed", "long_ld_regions.bed"),
+        id_excl=af_delta_exclude_input,
     output:
         eigenvec="data/preprocess/build_pca_clean.eigenvec",
         eigenvec_var="data/preprocess/build_pca_clean.eigenvec.allele",
         eigenval="data/preprocess/build_pca_clean.eigenval"
     params:
         inputname="data/preprocess/build",
-        outputname="data/preprocess/build_pca_clean"
+        outputname="data/preprocess/build_pca_clean",
+        id_excl_flag=lambda wildcards, input: snp_id_exclude_flag(input.id_excl),
     resources:
         lsf_err="logs/lsf/calculate_pca_clean.e",
         lsf_out="logs/lsf/calculate_pca_clean.o"
     shell:
         """
-        plink2 --pfile {params.inputname} \
-        --extract {input.pruned_snps} \
-        --exclude range {input.long_ld} \
-        --chr 1-7,9-22 \
-        --remove {input.pca_outliers} \
-        --pca 20 allele-wts \
-        --out {params.outputname}
+        if [ -n "{params.id_excl_flag}" ]; then
+          plink2 --pfile {params.inputname} \
+            --extract {input.pruned_snps} \
+            --exclude range {input.long_ld} \
+            --chr 1-7,9-22 \
+            --write-snplist --out data/plink/pca_variants
+          plink2 --pfile {params.inputname} \
+            --extract data/plink/pca_variants.snplist \
+            {params.id_excl_flag} \
+            --remove {input.pca_outliers} \
+            --pca 20 allele-wts --out {params.outputname}
+        else
+          plink2 --pfile {params.inputname} \
+            --extract {input.pruned_snps} \
+            --exclude range {input.long_ld} \
+            --chr 1-7,9-22 \
+            --remove {input.pca_outliers} \
+            --pca 20 allele-wts --out {params.outputname}
+        fi
         """

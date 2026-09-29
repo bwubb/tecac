@@ -9,6 +9,30 @@ os.makedirs("logs/cluster/regenie3",exist_ok=True)
 os.makedirs("logs/lsf",exist_ok=True)
 os.makedirs("data/regenie",exist_ok=True)
 
+_raw_af_delta=config.get("qc",{}).get("af_delta_thr", None)
+try:
+    AF_DELTA_THR=float(_raw_af_delta) if _raw_af_delta is not None and str(_raw_af_delta).strip()!="" else 0.0
+except (TypeError, ValueError):
+    AF_DELTA_THR=0.0
+AF_DELTA_EXCLUDE="data/qc/exclusions/af_delta_exclude.snplist"
+
+def af_delta_exclude_input(wildcards=None):
+    return [AF_DELTA_EXCLUDE] if AF_DELTA_THR>0 else []
+
+def snp_id_exclude_flag(path):
+    if not path:
+        return ""
+    if not isinstance(path, str):
+        path=str(path[0]) if len(path) else ""
+    if not path or not os.path.isfile(path):
+        return ""
+    with open(path) as f:
+        for line in f:
+            s=line.strip()
+            if s and not s.startswith("#"):
+                return f"--exclude {path}"
+    return ""
+
 # Extract configuration values
 PROJECT_NAME=config['project']['name']
 CHROMOSOMES_AUTOSOMAL=list(range(1,23)) # Chromosomes 1-22
@@ -29,19 +53,18 @@ localrules:create_vep_list,build_regenie_report_tables,regenie_report
 wildcard_constraints:
     CHR=r'\d+'
 
-rule run_regenie_report:
-    input:
-        expand("data/final/{PROJECT}.regenie_report.html",PROJECT=PROJECT_NAME)
-
 rule run_regenie:
     input:
         expand("data/final/{PROJECT}.chr{CHR}.step2_single_variant_STATUS.regenie",PROJECT=PROJECT_NAME,CHR=CHROMOSOMES_AUTOSOMAL),
         expand("data/final/{PROJECT}.chr{CHR}.step2_gene_based_STATUS.regenie",PROJECT=PROJECT_NAME,CHR=CHROMOSOMES_AUTOSOMAL),
-        expand("data/final/{PROJECT}.regenie_report.html",PROJECT=PROJECT_NAME),
         expand("data/final/{PROJECT}.regenie.covar.txt",PROJECT=PROJECT_NAME),
         expand("data/final/{PROJECT}.regenie.pheno.txt",PROJECT=PROJECT_NAME),
         expand("data/final/{PROJECT}.pathogenic_vus.csv",PROJECT=PROJECT_NAME),
         expand("data/final/{PROJECT}.synonymous.csv",PROJECT=PROJECT_NAME)
+
+rule run_regenie_report:
+    input:
+        expand("data/final/{PROJECT}.regenie_report.html",PROJECT=PROJECT_NAME)
 
 rule create_vep_list:
     input:
@@ -87,12 +110,43 @@ rule preprocess_regenie:
         --gene-consequence-exclude {input.gene_consequence_exclude}
         """
 
+rule make_step1_snplist:
+    input:
+        pgen="data/preprocess/build.pgen",
+        pvar="data/preprocess/build.pvar",
+        psam="data/preprocess/build.psam",
+        long_ld=config.get("input", {}).get("long_ld_bed", "long_ld_regions.bed"),
+        id_excl=af_delta_exclude_input,
+    output:
+        snplist="data/regenie/step1.snplist",
+    params:
+        input_basename="data/preprocess/build",
+        output_basename="data/regenie/step1_extract",
+        id_excl_flag=lambda wildcards, input: snp_id_exclude_flag(input.id_excl),
+    shell:
+        """
+        plink2 --pfile {params.input_basename} \
+          --exclude range {input.long_ld} \
+          --write-snplist --out {params.output_basename}_ld
+        if [ -n "{params.id_excl_flag}" ]; then
+          plink2 --pfile {params.input_basename} \
+            --extract {params.output_basename}_ld.snplist \
+            {params.id_excl_flag} \
+            --write-snplist --out {params.output_basename}
+          mv {params.output_basename}.snplist {output.snplist}
+          rm -f {params.output_basename}.log
+        else
+          mv {params.output_basename}_ld.snplist {output.snplist}
+        fi
+        rm -f {params.output_basename}_ld.snplist {params.output_basename}_ld.log
+        """
+
 rule run_step1_regenie:
     input:
         "data/preprocess/build.pgen",
         "data/regenie/regenie.covar.txt",
         "data/regenie/regenie.pheno.txt",
-        "data/preprocess/build.snplist"
+        "data/regenie/step1.snplist",
     output:
         "data/regenie/step1_1.loco.gz",
         "data/regenie/step1_pred.list"
@@ -150,7 +204,8 @@ rule run_step2_gene_based:
         "data/regenie/regenie.mask.txt",
         "data/regenie/step1_pred.list"
     output:
-        "data/regenie/chr{CHR}.step2_gene_based_STATUS.regenie"
+        "data/regenie/chr{CHR}.step2_gene_based_STATUS.regenie",
+        "data/regenie/chr{CHR}.step2_gene_based_masks.snplist",
     params:
         input_basename="data/preprocess/chr{CHR}.annotation",
         output_basename="data/regenie/chr{CHR}.step2_gene_based",
@@ -249,7 +304,6 @@ rule regenie_report:
         report_cons=f"data/final/{PROJECT_NAME}.report.consequence_matrix.tsv",
         report_gene_carr=f"data/final/{PROJECT_NAME}.report.gene_carriers.tsv",
         report_chek2_carr=f"data/final/{PROJECT_NAME}.report.chek2_carriers.tsv",
-        sample_meta="sample_meta.csv",
     output:
         f"data/final/{PROJECT_NAME}.regenie_report.html"
     params:

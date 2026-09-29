@@ -65,6 +65,7 @@ MIND_THR <- if (!is.null(qc_cfg) && !is.null(qc_cfg$mind_thr)) num_qc(qc_cfg$min
 MAF_THR <- if (!is.null(qc_cfg) && !is.null(qc_cfg$maf_thr)) num_qc(qc_cfg$maf_thr, 0.05) else 0.05
 GENO_THR <- if (!is.null(qc_cfg) && !is.null(qc_cfg$geno_thr)) num_qc(qc_cfg$geno_thr, 0.01) else 0.01
 HWE_THR <- if (!is.null(qc_cfg) && !is.null(qc_cfg$hwe_thr)) num_qc(qc_cfg$hwe_thr, 1e-6) else 1e-6
+AF_DELTA_THR <- if (!is.null(qc_cfg) && !is.null(qc_cfg$af_delta_thr)) num_qc(qc_cfg$af_delta_thr, 0) else 0
 pca_legend_theme <- theme(
   legend.position = "right",
   legend.title = element_text(size = 13),
@@ -167,7 +168,7 @@ This report supports the **current pipeline** using `select_variants3.smk`, `bui
 5. **Heterozygosity (build)**: Computed on **merge_mind.pruned** (the LD-pruned SNP subset from **merge_mind**).
    Outlier samples are removed from **merge_mind** to create **build**, while keeping the full post-QC SNP set in **build**.
 6. **PCA**: Runs on **build** samples while restricting variants to `merge_mind.prune.in` (with chr/long-LD exclusions in the PCA rule).
-   Outputs include `build_pca.eigenvec`, `build_pca.eigenval`, and `build_pca.eigenvec.allele`; loading plots use positions from `build.pvar`.
+   Outputs include `build_pca.eigenvec`, `build_pca.eigenval`, and `build_pca.eigenvec.allele`; loading plots (PC1–PC3) and spike-body window tables use positions from `build.pvar`.
 7. **Annotation base (annotation_files3)**: Subset to build-passing samples (`site-qc.het_miss`) and run first no-sample VEP parse.
 8. **MNP branch (mnp.smk split path)**: Detect candidate pairs, run sample-level PASS/read-check filtering, rewrite MNP genotypes, and generate MNP no-sample VEP outputs.
 9. **Rejoin after MNP**: Merge adjusted MNP records back into both genotype BCF and no-sample VEP track.
@@ -181,6 +182,8 @@ Unless explicitly stated, filtering steps are cumulative, and counts reflect the
 # Load Data
 
 A single covariate file (with header) supplies Status and Freeze for all QC views and pipeline steps.
+
+In this report, covariate `FREEZE` is kept as a **string** (never a numeric scale). **`5` is labeled `TECAC`** in every table and plot; PMBB batches stay `"1"`–`"4"`. The on-disk covariates file is unchanged (REGENIE still uses integer 5). Use the Freeze-colored PCA and missingness tables to look for TECAC vs PMBB batch structure.
 
 Ancestry groups for PCA use a tab-separated file with columns `FID`, `IID`, `AncGroup` (`anc_group.tsv` beside this report, or the path in `config.yml`).
 
@@ -412,6 +415,30 @@ colnames(sex_report)[colnames(sex_report) == "Status"] <- "Sex"
 
 # Status and Freeze from single covariate file (FID, IID, FREEZE, STATUS)
 id_in_report <- function(d) if ("IID" %in% names(d)) trimws(as.character(d$IID)) else trimws(as.character(d[,1]))
+# Display labels only: covariate 5 -> TECAC. Always character so ggplot/tables do not treat freeze as numeric.
+label_freeze <- function(x) {
+  x <- trimws(as.character(x))
+  x[x %in% c("", "NA", "NaN", "NULL")] <- NA_character_
+  x[!is.na(x) & (x %in% c("5", "5.0") | grepl("^freeze\\s*5$", x, ignore.case = TRUE))] <- "TECAC"
+  x
+}
+freeze_factor <- function(x) {
+  x <- label_freeze(x)
+  known <- c("1", "2", "3", "4", "TECAC")
+  extra <- setdiff(sort(unique(x[!is.na(x)])), known)
+  factor(x, levels = c("1", "2", "3", "4", extra, "TECAC"))
+}
+tecac_vs_pmbb <- function(d) {
+  d %>%
+    dplyr::filter(!is.na(Freeze)) %>%
+    dplyr::mutate(
+      Cohort = factor(
+        ifelse(as.character(Freeze) == "TECAC", "TECAC", "PMBB"),
+        levels = c("PMBB", "TECAC")
+      )
+    )
+}
+tecac_cohort_colors <- c(PMBB = "gray72", TECAC = "#D55E00")
 status_lookup <- character(0)
 freeze_lookup <- character(0)
 # Use length nrow(.) so 0-row tables (e.g. empty missingness_report.txt) don't trigger replacement error
@@ -459,7 +486,7 @@ if (COVARIATE_FILE != "" && file.exists(COVARIATE_FILE)) {
     }
 
     if (!is.na(freeze_idx)) {
-      freeze_lookup <- setNames(trimws(as.character(cov_df[[freeze_idx]])), iids)
+      freeze_lookup <- setNames(label_freeze(cov_df[[freeze_idx]]), iids)
       sex_report$Freeze <- as.character(freeze_lookup[id_in_report(sex_report)])
       miss_report$Freeze <- as.character(freeze_lookup[id_in_report(miss_report)])
       het_report$Freeze <- as.character(freeze_lookup[id_in_report(het_report)])
@@ -1095,7 +1122,7 @@ agg_miss <- read.table(
 # Status and Freeze from covariate file (same as reports)
 agg_id <- if ("IID" %in% names(agg_miss)) trimws(agg_miss$IID) else trimws(agg_miss[,1])
 agg_miss$Status <- if (length(status_lookup) > 0) as.character(status_lookup[agg_id]) else "Unknown"
-agg_miss$Freeze <- if (length(freeze_lookup) > 0) as.character(freeze_lookup[agg_id]) else NA_character_
+agg_miss$Freeze <- if (length(freeze_lookup) > 0) label_freeze(freeze_lookup[agg_id]) else NA_character_
 
 ggplot(agg_miss, aes(x = F_MISS, fill = Status)) +
   geom_histogram(bins = 50, alpha = 0.7) +
@@ -1216,7 +1243,7 @@ if (nrow(case_miss) > 0) {
 
 ## Method
 
-In `build_files.smk`, per-chromosome SNP filters produce `site-qc.var-qc`; sample missingness (MIND) is applied; chromosomes are merged to **`merge_mind`** (mind-passing samples only). **LD pruning runs on `merge_mind`**, not on per-chr files: `--indep-pairwise 200 20 0.2`, excluding chromosome 8 and long-LD regions (e.g. HLA, 17q21.31). Outputs include `merge_mind.prune.in` and `merge_mind.prune.out`.
+In `build_files.smk`, per-chromosome SNP filters produce `site-qc.var-qc`; sample missingness (MIND) is applied; chromosomes are merged to **`merge_mind`** (mind-passing samples only). **LD pruning runs on `merge_mind`**, not on per-chr files: `--indep-pairwise` from `qc.ld_thr` (default `200 20 0.2`), excluding chromosome 8 and long-LD regions (e.g. HLA, 17q21.31). Outputs include `merge_mind.prune.in` and `merge_mind.prune.out`.
 
 This step does not remove variants from the final dataset. It only defines a subset of approximately independent SNPs for downstream statistical calculations (PCA and heterozygosity).
 
@@ -1430,13 +1457,39 @@ ggplot(pca, aes(x = PC1, y = PC2, color = Status)) +
 
 ```{r pca-plot-pc1-pc2-freeze, fig.height=6}
 if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na(pca$Freeze)) > 0) {
-  ggplot(pca %>% filter(!is.na(Freeze)), aes(x = PC1, y = PC2, color = factor(Freeze))) +
+  ggplot(pca %>% filter(!is.na(Freeze)), aes(x = PC1, y = PC2, color = freeze_factor(Freeze))) +
     geom_point(alpha = 0.55, size = 1.35, stroke = 0) +
     labs(
-      title = "PC1 vs PC2 by Freeze",
+      title = "PC1 vs PC2 by Freeze (5 = TECAC)",
       x = paste0("PC1 (", round(eigenval$Variance_Explained[1], 2), "%)"),
       y = paste0("PC2 (", round(eigenval$Variance_Explained[2], 2), "%)"),
       color = "Freeze"
+    ) +
+    theme_minimal(base_size = 13) +
+    pca_legend_guides +
+    pca_legend_theme +
+    theme(plot.title = element_text(face = "bold"))
+}
+```
+
+```{r pca-plot-pc1-pc2-tecac, fig.height=6}
+if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na(pca$Freeze)) > 0) {
+  pca_coh <- tecac_vs_pmbb(pca)
+  ggplot(pca_coh, aes(x = PC1, y = PC2, color = Cohort)) +
+    geom_point(
+      data = dplyr::filter(pca_coh, Cohort == "PMBB"),
+      alpha = 0.35, size = 1.25, stroke = 0
+    ) +
+    geom_point(
+      data = dplyr::filter(pca_coh, Cohort == "TECAC"),
+      alpha = 0.85, size = 1.55, stroke = 0
+    ) +
+    scale_color_manual(values = tecac_cohort_colors) +
+    labs(
+      title = "PC1 vs PC2 (TECAC vs PMBB)",
+      x = paste0("PC1 (", round(eigenval$Variance_Explained[1], 2), "%)"),
+      y = paste0("PC2 (", round(eigenval$Variance_Explained[2], 2), "%)"),
+      color = "Cohort"
     ) +
     theme_minimal(base_size = 13) +
     pca_legend_guides +
@@ -1495,13 +1548,39 @@ ggplot(pca, aes(x = PC3, y = PC4, color = Status)) +
 
 ```{r pca-plot-pc3-pc4-freeze, fig.height=6}
 if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na(pca$Freeze)) > 0) {
-  ggplot(pca %>% filter(!is.na(Freeze)), aes(x = PC3, y = PC4, color = factor(Freeze))) +
+  ggplot(pca %>% filter(!is.na(Freeze)), aes(x = PC3, y = PC4, color = freeze_factor(Freeze))) +
     geom_point(alpha = 0.55, size = 1.35, stroke = 0) +
     labs(
-      title = "PC3 vs PC4 by Freeze",
+      title = "PC3 vs PC4 by Freeze (5 = TECAC)",
       x = paste0("PC3 (", round(eigenval$Variance_Explained[3], 2), "%)"),
       y = paste0("PC4 (", round(eigenval$Variance_Explained[4], 2), "%)"),
       color = "Freeze"
+    ) +
+    theme_minimal(base_size = 13) +
+    pca_legend_guides +
+    pca_legend_theme +
+    theme(plot.title = element_text(face = "bold"))
+}
+```
+
+```{r pca-plot-pc3-pc4-tecac, fig.height=6}
+if (exists("has_freeze") && has_freeze && "Freeze" %in% names(pca) && sum(!is.na(pca$Freeze)) > 0) {
+  pca_coh <- tecac_vs_pmbb(pca)
+  ggplot(pca_coh, aes(x = PC3, y = PC4, color = Cohort)) +
+    geom_point(
+      data = dplyr::filter(pca_coh, Cohort == "PMBB"),
+      alpha = 0.35, size = 1.25, stroke = 0
+    ) +
+    geom_point(
+      data = dplyr::filter(pca_coh, Cohort == "TECAC"),
+      alpha = 0.85, size = 1.55, stroke = 0
+    ) +
+    scale_color_manual(values = tecac_cohort_colors) +
+    labs(
+      title = "PC3 vs PC4 (TECAC vs PMBB)",
+      x = paste0("PC3 (", round(eigenval$Variance_Explained[3], 2), "%)"),
+      y = paste0("PC4 (", round(eigenval$Variance_Explained[4], 2), "%)"),
+      color = "Cohort"
     ) +
     theme_minimal(base_size = 13) +
     pca_legend_guides +
@@ -1548,9 +1627,435 @@ ggplot(eigenval, aes(x = seq_len(nrow(eigenval)), y = Eigenvalue)) +
   theme_minimal()
 ```
 
+## Cohort allele frequency (build SNPs)
+
+PCA and the REGENIE GRM should not be driven by a handful of ugly regions, or by SNPs that do not behave the same in TECAC and PMBB.
+
+Two filters:
+
+1. **Long-range LD regions** (HLA, inversions, subtelomeres, and the rest of `long_ld_regions.bed`) come out automatically.
+2. **Frequency mismatches**: SNPs whose allele frequency differs by more than `r AF_DELTA_THR` between TECAC (freeze 5) and PMBB (freezes 1–4). A lot of those already sit inside the long-LD regions. The rest are extra cleanup.
+
+The scatter is every common SNP. Off the diagonal is a mismatch. The tables after it count what is already covered by long-LD, and what we still have to take out.
+
+
+```{r cohort-af-prep, include=FALSE}
+read_id_list <- function(path) {
+  if (!file.exists(path)) return(character())
+  x <- readLines(path, warn = FALSE)
+  x <- trimws(x)
+  x[nzchar(x) & !startsWith(x, "#")]
+}
+fmt_n <- function(x) format(as.integer(x), big.mark = ",", scientific = FALSE)
+fmt_pct <- function(num, den) {
+  if (is.na(den) || den <= 0) return("NA")
+  sprintf("%.2f%%", 100 * num / den)
+}
+norm_chr_af <- function(x) {
+  suppressWarnings(as.integer(gsub("^chr", "", as.character(x), ignore.case = TRUE)))
+}
+# Plink2 --exclude range is BED (0-based, half-open). VCF/pvar POS is 1-based.
+snp_in_bed <- function(chr, pos, bed) {
+  n <- length(chr)
+  if (is.null(bed) || nrow(bed) == 0 || n == 0) return(rep(FALSE, n))
+  hit <- rep(FALSE, n)
+  for (i in seq_len(nrow(bed))) {
+    hit <- hit | (
+      !is.na(chr) & !is.na(pos) &
+        chr == bed$CHR[i] &
+        pos > bed$start[i] &
+        pos <= bed$end[i]
+    )
+  }
+  hit
+}
+read_pvar_pos <- function(path) {
+  if (!file.exists(path)) return(NULL)
+  lines <- readLines(path, n = 300, warn = FALSE)
+  n_skip <- sum(grepl("^##", lines))
+  d <- read.delim(
+    path, skip = n_skip, sep = "\t", header = TRUE,
+    stringsAsFactors = FALSE, check.names = FALSE, comment.char = ""
+  )
+  names(d) <- sub("^#", "", names(d))
+  if (!all(c("CHROM", "POS", "ID") %in% names(d))) return(NULL)
+  dplyr::transmute(
+    d,
+    ID = as.character(ID),
+    CHR = norm_chr_af(CHROM),
+    POS = suppressWarnings(as.numeric(POS))
+  )
+}
+read_ld_bed <- function(path) {
+  if (!file.exists(path)) return(NULL)
+  ld_raw <- tryCatch(
+    utils::read.table(path, header = FALSE, sep = "", comment.char = "#", stringsAsFactors = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(ld_raw) || ncol(ld_raw) < 3) return(NULL)
+  dplyr::tibble(
+    CHR = norm_chr_af(ld_raw[[1]]),
+    start = as.numeric(ld_raw[[2]]),
+    end = as.numeric(ld_raw[[3]]),
+    name = if (ncol(ld_raw) >= 4) as.character(ld_raw[[4]]) else paste0("ld", seq_len(nrow(ld_raw)))
+  ) %>% dplyr::filter(!is.na(CHR), is.finite(start), is.finite(end))
+}
+
+cohort_af_ready <- FALSE
+af <- NULL
+af_flagged <- NULL
+n_build_af <- 0L
+n_flag <- 0L
+use_thr <- is.finite(AF_DELTA_THR) && AF_DELTA_THR > 0
+flag_lab <- if (use_thr) {
+  paste0("|AF delta| > ", AF_DELTA_THR)
+} else {
+  "AF_TECAC = 0 and AF_PMBB > 0"
+}
+prune_in <- character()
+pca_var_ids <- character()
+n_prune <- 0L
+n_pca_var <- 0L
+n_flag_prune <- 0L
+n_flag_pca_var <- 0L
+n_excl_file <- NA_integer_
+n_build_bed <- NA_integer_
+n_flag_bed <- NA_integer_
+n_flag_extra <- NA_integer_
+n_grm_after_bed <- NA_integer_
+n_prune_in_bed <- NA_integer_
+n_flag_prune_extra <- NA_integer_
+ld_bed_af <- NULL
+ld_overlap_ok <- FALSE
+af_delta_summary <- NULL
+af_mismatch_summary <- NULL
+af_pca_summary <- NULL
+af_bed_counts <- NULL
+af_chr_counts <- NULL
+af_top <- NULL
+
+af_path <- file.path(DATA_DIR, "qc/reports", "build_af_tecac_vs_pmbb.tsv")
+excl_path <- file.path(DATA_DIR, "qc/exclusions", "af_delta_exclude.snplist")
+prune_path <- file.path(DATA_DIR, "plink", "merge_mind.prune.in")
+pca_var_path <- file.path(DATA_DIR, "plink", "pca_variants.snplist")
+pvar_path_af <- file.path(DATA_DIR, "preprocess", "build.pvar")
+ld_path_af <- if (!is.null(inp) && !is.null(inp$long_ld_bed) && nzchar(as.character(inp$long_ld_bed)[1])) {
+  as.character(inp$long_ld_bed)[1]
+} else {
+  "long_ld_regions.bed"
+}
+
+if (file.exists(af_path)) {
+  af <- read.delim(af_path, stringsAsFactors = FALSE, check.names = FALSE)
+  af$AF_TECAC <- suppressWarnings(as.numeric(af$AF_TECAC))
+  af$AF_PMBB <- suppressWarnings(as.numeric(af$AF_PMBB))
+  af <- af[is.finite(af$AF_TECAC) & is.finite(af$AF_PMBB), , drop = FALSE]
+  af$af_delta <- abs(af$AF_TECAC - af$AF_PMBB)
+  af$flag <- if (use_thr) af$af_delta > AF_DELTA_THR else (af$AF_TECAC == 0 & af$AF_PMBB > 0)
+  af$CHR <- norm_chr_af(af$CHROM)
+  n_build_af <- nrow(af)
+  n_flag <- sum(af$flag, na.rm = TRUE)
+  prune_in <- read_id_list(prune_path)
+  pca_var_ids <- read_id_list(pca_var_path)
+  n_prune <- length(prune_in)
+  n_pca_var <- length(pca_var_ids)
+  if (file.exists(excl_path)) n_excl_file <- length(read_id_list(excl_path))
+
+  pos_tbl <- read_pvar_pos(pvar_path_af)
+  ld_bed_af <- read_ld_bed(ld_path_af)
+  if (!is.null(pos_tbl) && !is.null(ld_bed_af) && nrow(ld_bed_af) > 0) {
+    pos_tbl$in_long_ld <- snp_in_bed(pos_tbl$CHR, pos_tbl$POS, ld_bed_af)
+    af <- dplyr::left_join(af, pos_tbl %>% dplyr::select(ID, POS, in_long_ld), by = "ID")
+    af$in_long_ld <- !is.na(af$in_long_ld) & af$in_long_ld
+    n_build_bed <- sum(pos_tbl$in_long_ld, na.rm = TRUE)
+    n_grm_after_bed <- nrow(pos_tbl) - n_build_bed
+    n_flag_bed <- sum(af$flag & af$in_long_ld, na.rm = TRUE)
+    n_flag_extra <- sum(af$flag & !af$in_long_ld, na.rm = TRUE)
+    n_prune_in_bed <- if (n_prune > 0) sum(pos_tbl$ID %in% prune_in & pos_tbl$in_long_ld) else NA_integer_
+    ld_overlap_ok <- TRUE
+    af_bed_counts <- ld_bed_af %>%
+      dplyr::rowwise() %>%
+      dplyr::mutate(
+        n_build = sum(pos_tbl$CHR == CHR & pos_tbl$POS > start & pos_tbl$POS <= end, na.rm = TRUE),
+        n_flagged = sum(
+          af$flag & af$CHR == CHR & !is.na(af$POS) & af$POS > start & af$POS <= end,
+          na.rm = TRUE
+        )
+      ) %>%
+      dplyr::ungroup() %>%
+      dplyr::transmute(
+        Region = name,
+        CHR,
+        start,
+        end,
+        SNPs = n_build,
+        `Frequency mismatch` = n_flagged
+      )
+  } else {
+    af$in_long_ld <- FALSE
+    af$POS <- NA_real_
+  }
+
+  af_flagged <- af[af$flag, , drop = FALSE]
+  n_flag_prune <- if (n_prune > 0) sum(af_flagged$ID %in% prune_in) else 0L
+  n_flag_pca_var <- if (n_pca_var > 0) sum(af_flagged$ID %in% pca_var_ids) else 0L
+  n_flag_prune_extra <- if (ld_overlap_ok && n_prune > 0) {
+    sum(af_flagged$ID %in% prune_in & !af_flagged$in_long_ld)
+  } else {
+    NA_integer_
+  }
+
+  n_start <- if (ld_overlap_ok) nrow(pos_tbl) else n_build_af
+  n_grm_drop <- if (ld_overlap_ok) n_build_bed + n_flag_extra else NA_integer_
+  n_grm_keep <- if (ld_overlap_ok) n_start - n_grm_drop else NA_integer_
+  n_pca_keep <- if (n_prune > 0 && !is.na(n_flag_prune_extra)) n_prune - n_flag_prune_extra else NA_integer_
+  mismatch_lab <- if (use_thr) {
+    paste0("TECAC vs PMBB frequency mismatch (|ΔAF| > ", AF_DELTA_THR, ")")
+  } else {
+    "TECAC AF = 0 and PMBB AF > 0"
+  }
+
+  af_delta_summary <- data.frame(
+    Filter = c(
+      "Starting SNPs",
+      "Long-range LD regions",
+      paste0(mismatch_lab, ", not already in a long-LD region"),
+      "Total removed from relatedness",
+      "Remaining for relatedness"
+    ),
+    SNPs = c(
+      n_start,
+      n_build_bed,
+      n_flag_extra,
+      n_grm_drop,
+      n_grm_keep
+    ),
+    Percent = c(
+      fmt_pct(n_start, n_start),
+      if (ld_overlap_ok) fmt_pct(n_build_bed, n_start) else "need build.pvar and the BED",
+      if (ld_overlap_ok) fmt_pct(n_flag_extra, n_start) else "need build.pvar and the BED",
+      if (ld_overlap_ok) fmt_pct(n_grm_drop, n_start) else "—",
+      if (ld_overlap_ok) fmt_pct(n_grm_keep, n_start) else "—"
+    ),
+    stringsAsFactors = FALSE
+  )
+  af_mismatch_summary <- data.frame(
+    Filter = c(
+      mismatch_lab,
+      "Already inside a long-LD region",
+      "Outside long-LD regions (extra cleanup)"
+    ),
+    SNPs = c(n_flag, n_flag_bed, n_flag_extra),
+    Percent = c(
+      fmt_pct(n_flag, n_flag),
+      if (ld_overlap_ok) fmt_pct(n_flag_bed, n_flag) else "need build.pvar and the BED",
+      if (ld_overlap_ok) fmt_pct(n_flag_extra, n_flag) else "need build.pvar and the BED"
+    ),
+    stringsAsFactors = FALSE
+  )
+  af_pca_summary <- data.frame(
+    Filter = c(
+      "Starting SNPs (LD-pruned; long-LD regions already out)",
+      mismatch_lab,
+      "Remaining for PCA"
+    ),
+    SNPs = c(
+      n_prune,
+      if (!is.na(n_flag_prune_extra)) n_flag_prune_extra else n_flag_prune,
+      n_pca_keep
+    ),
+    Percent = c(
+      if (n_prune > 0) fmt_pct(n_prune, n_prune) else "prune.in missing",
+      if (n_prune > 0) fmt_pct(if (!is.na(n_flag_prune_extra)) n_flag_prune_extra else n_flag_prune, n_prune) else "—",
+      if (n_prune > 0 && !is.na(n_pca_keep)) fmt_pct(n_pca_keep, n_prune) else "—"
+    ),
+    stringsAsFactors = FALSE
+  )
+  if (n_flag > 0) {
+    af_chr_counts <- af_flagged %>%
+      dplyr::filter(!is.na(CHR)) %>%
+      dplyr::mutate(
+        drop_class = ifelse(
+          ld_overlap_ok & in_long_ld,
+          "already in a long-LD region",
+          "frequency mismatch only"
+        )
+      ) %>%
+      dplyr::count(CHR, drop_class, name = "N_flagged") %>%
+      dplyr::arrange(CHR)
+    af_top <- af_flagged %>%
+      dplyr::arrange(dplyr::desc(af_delta)) %>%
+      dplyr::transmute(
+        CHROM, ID, REF, ALT,
+        AF_TECAC = round(AF_TECAC, 4),
+        AF_PMBB = round(AF_PMBB, 4),
+        abs_delta = round(af_delta, 4),
+        `long-LD region` = if (ld_overlap_ok) ifelse(in_long_ld, "yes", "no") else "unknown"
+      ) %>%
+      utils::head(15)
+  }
+  cohort_af_ready <- TRUE
+}
+```
+
+
+```{r cohort-af-tecac-pmbb, echo=FALSE, fig.width=6.5, fig.height=6.2}
+if (!cohort_af_ready) {
+  cat("_No `build_af_tecac_vs_pmbb.tsv` (run **`build_af_tecac_vs_pmbb`**)._")
+} else {
+  print(
+    ggplot(af, aes(x = AF_TECAC, y = AF_PMBB, color = flag)) +
+      geom_point(alpha = 0.35, size = 0.45, stroke = 0) +
+      scale_color_manual(
+        values = c("FALSE" = "gray55", "TRUE" = "#D55E00"),
+        labels = c("FALSE" = "similar AF", "TRUE" = "frequency mismatch"),
+        name = NULL
+      ) +
+      labs(
+        title = "Allele frequency: TECAC vs PMBB",
+        subtitle = paste0(fmt_n(n_flag), " SNPs differ by more than ", AF_DELTA_THR),
+        x = "AF in TECAC",
+        y = "AF in PMBB"
+      ) +
+      theme_minimal(base_size = 13) +
+      pca_legend_guides +
+      pca_legend_theme +
+      theme(plot.title = element_text(face = "bold"))
+  )
+}
+```
+
+### SNPs taken out of relatedness
+
+Long-LD regions are the first filter. Frequency mismatches are the second. Percents in the first table are of the starting common SNPs. Percents in the second table are of the frequency-mismatch SNPs only, so you can see how many were already covered by long-LD.
+
+```{r cohort-af-delta-stats, echo=FALSE, results="asis"}
+if (cohort_af_ready) {
+  print(knitr::kable(
+    af_delta_summary,
+    caption = paste0(
+      "Relatedness SNP filters (PCA and REGENIE GRM). Percents are of ",
+      fmt_n(n_start), " starting SNPs."
+    )
+  ))
+  cat("\n\n")
+  print(knitr::kable(
+    af_mismatch_summary,
+    caption = paste0(
+      "Where the frequency-mismatch SNPs sit. Percents are of ",
+      fmt_n(n_flag), " mismatched SNPs, not of the full SNP set."
+    )
+  ))
+  cat("\n\n")
+  pca_cap <- paste0(
+    "PCA uses the LD-pruned list (long-LD regions already out). Percents are of ",
+    fmt_n(n_prune), " PCA SNPs."
+  )
+  if (ld_overlap_ok && !is.na(n_prune_in_bed) && n_prune_in_bed > 0) {
+    pca_cap <- paste0(
+      pca_cap,
+      " ", fmt_n(n_prune_in_bed), " of those SNPs still overlap the current long-LD list; the BED probably grew after pruning."
+    )
+  }
+  print(knitr::kable(af_pca_summary, caption = pca_cap))
+  if (!is.null(af_bed_counts) && nrow(af_bed_counts) > 0) {
+    cat("\n\n")
+    print(knitr::kable(
+      af_bed_counts,
+      caption = "Long-range LD regions. Frequency mismatch is how many SNPs in that region also fail the TECAC vs PMBB check; they are already in the region total, not extra."
+    ))
+  }
+  if (n_flag > 0) {
+    cat("\n\n")
+    print(knitr::kable(
+      data.frame(
+        Statistic = c("Median |ΔAF| among mismatches", "Largest |ΔAF| among mismatches"),
+        Value = c(
+          format(round(stats::median(af_flagged$af_delta), 4), nsmall = 4),
+          format(round(max(af_flagged$af_delta), 4), nsmall = 4)
+        ),
+        stringsAsFactors = FALSE
+      ),
+      caption = "How far TECAC and PMBB allele frequencies differ for the mismatched SNPs"
+    ))
+  }
+}
+```
+
+```{r cohort-af-delta-hist, echo=FALSE, fig.width=7.5, fig.height=4.2}
+if (cohort_af_ready) {
+  p_hist <- ggplot(af, aes(x = af_delta, fill = flag)) +
+    geom_histogram(bins = 60, color = NA, boundary = 0) +
+    scale_fill_manual(
+      values = c("FALSE" = "gray55", "TRUE" = "#D55E00"),
+      labels = c("FALSE" = "similar AF", "TRUE" = "frequency mismatch"),
+      name = NULL
+    ) +
+    scale_y_continuous(labels = scales::comma) +
+    labs(
+      title = "How far TECAC and PMBB allele frequencies differ",
+      subtitle = paste0("Right of the line: |ΔAF| > ", AF_DELTA_THR),
+      x = "|AF_TECAC − AF_PMBB|",
+      y = "SNPs"
+    ) +
+    theme_minimal(base_size = 13) +
+    pca_legend_guides +
+    pca_legend_theme +
+    theme(plot.title = element_text(face = "bold"))
+  if (use_thr) {
+    p_hist <- p_hist + geom_vline(xintercept = AF_DELTA_THR, color = "#D55E00", linewidth = 0.8)
+  }
+  print(p_hist)
+}
+```
+
+```{r cohort-af-delta-chr, echo=FALSE, fig.width=8.5, fig.height=4}
+if (cohort_af_ready && !is.null(af_chr_counts) && nrow(af_chr_counts) > 0) {
+  print(
+    ggplot(af_chr_counts, aes(
+      x = factor(CHR, levels = sort(unique(CHR))),
+      y = N_flagged,
+      fill = drop_class
+    )) +
+      geom_col() +
+      scale_fill_manual(
+        values = c("already in a long-LD region" = "gray55", "frequency mismatch only" = "#D55E00"),
+        name = NULL
+      ) +
+      scale_y_continuous(labels = scales::comma) +
+      labs(
+        title = "Where the frequency-mismatch SNPs sit",
+        subtitle = "Gray is already covered by a long-LD region. Vermillion is extra cleanup.",
+        x = "Chromosome",
+        y = "SNPs"
+      ) +
+      theme_minimal(base_size = 13) +
+      pca_legend_guides +
+      pca_legend_theme +
+      theme(plot.title = element_text(face = "bold"))
+  )
+}
+```
+
+```{r cohort-af-delta-top, echo=FALSE}
+if (cohort_af_ready && !is.null(af_top) && nrow(af_top) > 0) {
+  knitr::kable(
+    af_top,
+    caption = "Worst TECAC vs PMBB frequency mismatches. yes under long-LD region means that SNP is already covered by the first filter."
+  )
+}
+```
+
 ## Allele PC loadings (diagnostic for PCA structure)
 
-These plots show which genomic regions drive PC structure. The dashed line marks the 99.9th percentile of absolute loading, used as a diagnostic cutoff to highlight the top 0.1% of variants for each PC.
+SNP weights from `plink2 --pca allele-wts` (`build_pca.eigenvec.allele` + `build.pvar`). This is the LD-pruned common-SNP PCA set, not the rare-variant ExWAS list.
+
+Two cutoffs are shown so a visible spike is not lost in the table:
+
+- **Red dashed** = 99.9th percentile of `|PC|` (top 0.1%). Only SNPs above this line enter the “99.9th” region tables. A spike whose body sits below that line will not show up there.
+- **Gray dotted** = `|PC| = 2`. Unique SNPs at or above 2, merged within 1 Mb, are the **spike-body** windows (tables further down). `n_snps` is unique IDs; `span_bp` and `snps_per_Mb` describe how tight the window is.
+
+If capture or long-range LD were concentrating bias in a **region**, it would typically look like a **tight** window: high `n_snps`, short `span_bp`, one or a few chromosomes. High-loading SNPs scattered over many chromosomes, or windows that are a single SNP / &gt;1 Mb, are a more distributed pattern. `overlap_long_ld` and `named_locus` are labels (current exclusion BED; hg38 catalog HLA, TRB, 16p13.11, 17q12–q21.2, MAPT, KIR, IGH, IGK, IGL), not a keep/drop list.
 
 ```{r pca-loading-prep, include=FALSE}
 read_plink_skip_meta <- function(path) {
@@ -1563,9 +2068,17 @@ read_plink_skip_meta <- function(path) {
 }
 
 get_loading_regions <- function(df, abs_col, thr, gap_bp = 1e6) {
-  df %>%
+  hit <- df %>%
     dplyr::filter(.data[[abs_col]] >= thr) %>%
-    dplyr::arrange(CHR, POS) %>%
+    dplyr::arrange(CHR, POS)
+  if (nrow(hit) == 0) {
+    return(dplyr::tibble(
+      CHR = integer(), start = numeric(), end = numeric(), n_snps = integer(),
+      max_loading = numeric(), top_pos = numeric(), top_id = character(),
+      span_bp = numeric(), snps_per_Mb = numeric()
+    ))
+  }
+  hit %>%
     dplyr::group_by(CHR) %>%
     dplyr::mutate(region_id = cumsum(c(1, diff(POS) > gap_bp))) %>%
     dplyr::group_by(CHR, region_id) %>%
@@ -1578,13 +2091,117 @@ get_loading_regions <- function(df, abs_col, thr, gap_bp = 1e6) {
       top_id = ID[which.max(.data[[abs_col]])],
       .groups = "drop"
     ) %>%
-    dplyr::arrange(dplyr::desc(max_loading), dplyr::desc(n_snps), CHR, start)
+    dplyr::mutate(
+      span_bp = end - start,
+      snps_per_Mb = ifelse(span_bp < 1, NA_real_, n_snps / (span_bp / 1e6))
+    ) %>%
+    dplyr::arrange(dplyr::desc(n_snps), dplyr::desc(max_loading), CHR, start)
+}
+
+norm_chr <- function(x) {
+  suppressWarnings(as.integer(gsub("^chr", "", as.character(x), ignore.case = TRUE)))
+}
+
+# Catalog for labels (hg38). long_ld overlap is taken from the BED on disk.
+named_loci <- dplyr::tribble(
+  ~CHR, ~start, ~end, ~name,
+  6L, 28500000, 33500000, "HLA",
+  7L, 141600000, 143100000, "TRB",
+  16L, 14900000, 16400000, "CNV16p13.11",
+  17L, 36500000, 41500000, "17q12_q21.2",
+  17L, 43000000, 47000000, "INV17q21_MAPT",
+  19L, 54000000, 55100000, "LILR_KIR",
+  14L, 105000000, 107000000, "IGH",
+  2L, 88800000, 90300000, "IGK",
+  22L, 22000000, 23000000, "IGL"
+)
+
+overlap_names <- function(chr, start, end, bed, col = "name") {
+  if (is.null(bed) || nrow(bed) == 0 || is.na(chr)) return("")
+  hit <- bed[bed$CHR == chr & bed$start < end & bed$end > start, , drop = FALSE]
+  if (nrow(hit) == 0) return("")
+  paste(unique(hit[[col]]), collapse = ";")
+}
+
+annotate_windows <- function(wins, ld_bed) {
+  if (nrow(wins) == 0) {
+    return(dplyr::mutate(wins, overlap_long_ld = character(), named_locus = character()))
+  }
+  wins %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      overlap_long_ld = overlap_names(CHR, start, end, ld_bed),
+      named_locus = overlap_names(CHR, start, end, named_loci)
+    ) %>%
+    dplyr::ungroup()
+}
+
+plot_pc_loading <- function(df, ycol, thr99, pc_lab, x_scale) {
+  ggplot(df, aes(x = xbp, y = .data[[ycol]])) +
+    geom_point(aes(color = chr_alt), size = 0.18, alpha = 0.35) +
+    scale_color_manual(values = c("0" = "gray35", "1" = "gray70"), guide = "none") +
+    geom_hline(yintercept = 2, linetype = "dotted", color = "gray20") +
+    geom_hline(yintercept = thr99, linetype = "dashed", color = "red") +
+    x_scale +
+    labs(
+      title = paste("Genomic drivers of", pc_lab),
+      subtitle = paste0(
+        "Dotted |", pc_lab, "| = 2 (window table). Dashed 99.9th percentile = ",
+        signif(thr99, 5), "."
+      ),
+      x = "Chromosome",
+      y = paste0("|", pc_lab, " loading|")
+    ) +
+    theme_minimal()
+}
+
+window_table_cols <- c("CHR", "start", "end", "span_bp", "n_snps", "snps_per_Mb", "max_loading", "top_id", "overlap_long_ld", "named_locus")
+
+summarise_windows <- function(wins, pc) {
+  if (is.null(wins) || nrow(wins) == 0) {
+    return(dplyr::tibble(
+      PC = pc, n_windows = 0L, n_chromosomes = 0L,
+      n_compact_250kb = 0L, n_multiSNP_lt_1Mb = 0L,
+      median_span_kb = NA_real_, max_n_snps = NA_integer_
+    ))
+  }
+  dplyr::tibble(
+    PC = pc,
+    n_windows = nrow(wins),
+    n_chromosomes = dplyr::n_distinct(wins$CHR),
+    n_compact_250kb = sum(wins$span_bp < 2.5e5, na.rm = TRUE),
+    n_multiSNP_lt_1Mb = sum(wins$span_bp < 1e6 & wins$n_snps >= 5, na.rm = TRUE),
+    median_span_kb = round(stats::median(wins$span_bp) / 1e3, 1),
+    max_n_snps = as.integer(max(wins$n_snps, na.rm = TRUE))
+  )
 }
 
 pca_loading_ready <- FALSE
+has_pc3_load <- FALSE
 pca_loading_msg <- ""
+ld_bed <- NULL
 allele_path <- file.path(DATA_DIR, "preprocess", "build_pca.eigenvec.allele")
 pvar_path <- file.path(DATA_DIR, "preprocess", "build.pvar")
+ld_path <- if (!is.null(inp) && !is.null(inp$long_ld_bed) && nzchar(as.character(inp$long_ld_bed)[1])) {
+  as.character(inp$long_ld_bed)[1]
+} else {
+  "long_ld_regions.bed"
+}
+
+if (file.exists(ld_path)) {
+  ld_raw <- tryCatch(
+    utils::read.table(ld_path, header = FALSE, sep = "", comment.char = "#", stringsAsFactors = FALSE),
+    error = function(e) NULL
+  )
+  if (!is.null(ld_raw) && ncol(ld_raw) >= 3) {
+    ld_bed <- dplyr::tibble(
+      CHR = norm_chr(ld_raw[[1]]),
+      start = as.numeric(ld_raw[[2]]),
+      end = as.numeric(ld_raw[[3]]),
+      name = if (ncol(ld_raw) >= 4) as.character(ld_raw[[4]]) else paste0("ld", seq_len(nrow(ld_raw)))
+    ) %>% dplyr::filter(!is.na(CHR), is.finite(start), is.finite(end))
+  }
+}
 
 if (!file.exists(allele_path)) {
   pca_loading_msg <- paste0("**Allele loadings** missing `", allele_path, "` (e.g. **`--pca 20 allele-wts`** in **`calculate_pca`**).")
@@ -1600,6 +2217,7 @@ if (!file.exists(allele_path)) {
   } else if (!"ID" %in% names(pv) || !"POS" %in% names(pv)) {
     pca_loading_msg <- "**build.pvar** must include **ID** and **POS**."
   } else {
+    has_pc3_load <- "PC3" %in% names(al)
     al1 <- al %>% dplyr::distinct(ID, .keep_all = TRUE)
     pos_tbl <- pv %>%
       dplyr::distinct(ID, .keep_all = TRUE) %>%
@@ -1615,15 +2233,17 @@ if (!file.exists(allele_path)) {
       pv_df <- m %>%
         dplyr::transmute(
           ID = trimws(as.character(ID)),
-          CHR = suppressWarnings(as.integer(gsub("^chr", "", as.character(CHROM)))),
+          CHR = norm_chr(CHROM),
           POS = suppressWarnings(as.numeric(POS)),
           PC1 = suppressWarnings(as.numeric(PC1)),
-          PC2 = suppressWarnings(as.numeric(PC2))
+          PC2 = suppressWarnings(as.numeric(PC2)),
+          PC3 = if (has_pc3_load) suppressWarnings(as.numeric(PC3)) else NA_real_
         ) %>%
         dplyr::filter(!is.na(POS), is.finite(POS), is.finite(PC1), is.finite(PC2), !is.na(CHR)) %>%
         dplyr::mutate(
           abs_PC1 = abs(PC1),
-          abs_PC2 = abs(PC2)
+          abs_PC2 = abs(PC2),
+          abs_PC3 = abs(PC3)
         )
 
       if (nrow(pv_df) == 0) {
@@ -1656,9 +2276,27 @@ if (!file.exists(allele_path)) {
 
         thr1 <- quantile(pv2$abs_PC1, 0.999, na.rm = TRUE)
         thr2 <- quantile(pv2$abs_PC2, 0.999, na.rm = TRUE)
+        thr3 <- if (has_pc3_load) quantile(pv2$abs_PC3, 0.999, na.rm = TRUE) else NA_real_
 
-        pc1_regions <- get_loading_regions(pv2, "abs_PC1", thr1)
-        pc2_regions <- get_loading_regions(pv2, "abs_PC2", thr2)
+        pc1_regions <- annotate_windows(get_loading_regions(pv2, "abs_PC1", thr1), ld_bed)
+        pc2_regions <- annotate_windows(get_loading_regions(pv2, "abs_PC2", thr2), ld_bed)
+        pc3_regions <- if (has_pc3_load) {
+          annotate_windows(get_loading_regions(pv2, "abs_PC3", thr3), ld_bed)
+        } else {
+          NULL
+        }
+
+        spike_thr <- 2
+        pc2_windows <- annotate_windows(get_loading_regions(pv2, "abs_PC2", spike_thr), ld_bed)
+        pc3_windows <- if (has_pc3_load) {
+          annotate_windows(get_loading_regions(pv2, "abs_PC3", spike_thr), ld_bed)
+        } else {
+          NULL
+        }
+
+        pc2_win_sum <- summarise_windows(pc2_windows, "PC2")
+        pc3_win_sum <- if (has_pc3_load) summarise_windows(pc3_windows, "PC3") else NULL
+        loading_window_summary <- dplyr::bind_rows(pc2_win_sum, pc3_win_sum)
 
         pca_loading_ready <- TRUE
       }
@@ -1673,41 +2311,41 @@ if (!pca_loading_ready && nzchar(pca_loading_msg)) {
 }
 ```
 
-### Genomic drivers of PC1
+### Current long-LD exclusions
 
-```{r pca-loading-plot-pc1, echo=FALSE, fig.width=11, fig.height=4}
-if (pca_loading_ready) {
-  print(
-    ggplot(pv2, aes(x = xbp, y = abs_PC1)) +
-      geom_point(aes(color = chr_alt), size = 0.18, alpha = 0.35) +
-      scale_color_manual(values = c("0" = "gray35", "1" = "gray70"), guide = "none") +
-      geom_hline(yintercept = thr1, linetype = "dashed", color = "red") +
-      x_scale +
-      labs(
-        title = "Genomic drivers of PC1",
-        subtitle = paste0(
-          "Dashed line = 99.9th percentile of |PC1| = ",
-          signif(thr1, 5),
-          " (top 0.1% of variants)"
-        ),
-        x = "Chromosome",
-        y = "|PC1 loading|"
-      ) +
-      theme_minimal()
+These intervals come out of PCA and the GRM automatically. Frequency-mismatch SNPs that already sit here are not extra removals.
+
+```{r pca-loading-long-ld-bed, echo=FALSE}
+if (!is.null(ld_bed) && nrow(ld_bed) > 0) {
+  knitr::kable(
+    ld_bed %>%
+      dplyr::transmute(
+        CHROM = paste0("chr", CHR),
+        start = format(start, scientific = FALSE, trim = TRUE),
+        end = format(end, scientific = FALSE, trim = TRUE),
+        name
+      ),
+    caption = "Long-range LD regions removed from relatedness"
   )
 }
 ```
 
-Regions are defined by grouping above-cutoff variants that lie within 1 Mb of each other on the same chromosome.
+### Genomic drivers of PC1
 
-### PC1 regions above loading cutoff
+```{r pca-loading-plot-pc1, echo=FALSE, fig.width=11, fig.height=4}
+if (pca_loading_ready) {
+  print(plot_pc_loading(pv2, "abs_PC1", thr1, "PC1", x_scale))
+}
+```
+
+### PC1 regions above 99.9th-percentile cutoff
 
 ```{r pca-loading-table-pc1, echo=FALSE}
 if (pca_loading_ready) {
   knitr::kable(
-    head(pc1_regions[, c("CHR", "start", "end", "n_snps", "max_loading", "top_pos", "top_id")], 20),
+    utils::head(pc1_regions[, intersect(window_table_cols, names(pc1_regions))], 20),
     digits = 4,
-    caption = "PC1 regions above loading cutoff"
+    caption = "PC1: unique SNPs with |PC1| at or above the 99.9th percentile, merged at 1 Mb"
   )
 }
 ```
@@ -1716,35 +2354,71 @@ if (pca_loading_ready) {
 
 ```{r pca-loading-plot-pc2, echo=FALSE, fig.width=11, fig.height=4}
 if (pca_loading_ready) {
-  print(
-    ggplot(pv2, aes(x = xbp, y = abs_PC2)) +
-      geom_point(aes(color = chr_alt), size = 0.18, alpha = 0.35) +
-      scale_color_manual(values = c("0" = "gray35", "1" = "gray70"), guide = "none") +
-      geom_hline(yintercept = thr2, linetype = "dashed", color = "red") +
-      x_scale +
-      labs(
-        title = "Genomic drivers of PC2",
-        subtitle = paste0(
-          "Dashed line = 99.9th percentile of |PC2| = ",
-          signif(thr2, 5),
-          " (top 0.1% of variants)"
-        ),
-        x = "Chromosome",
-        y = "|PC2 loading|"
-      ) +
-      theme_minimal()
-  )
+  print(plot_pc_loading(pv2, "abs_PC2", thr2, "PC2", x_scale))
 }
 ```
 
-### PC2 regions above loading cutoff
+### PC2 regions above 99.9th-percentile cutoff
 
 ```{r pca-loading-table-pc2, echo=FALSE}
 if (pca_loading_ready) {
   knitr::kable(
-    head(pc2_regions[, c("CHR", "start", "end", "n_snps", "max_loading", "top_pos", "top_id")], 20),
+    utils::head(pc2_regions[, intersect(window_table_cols, names(pc2_regions))], 20),
     digits = 4,
-    caption = "PC2 regions above loading cutoff"
+    caption = "PC2: unique SNPs with |PC2| at or above the 99.9th percentile, merged at 1 Mb"
+  )
+}
+```
+
+### Genomic drivers of PC3
+
+```{r pca-loading-plot-pc3, echo=FALSE, fig.width=11, fig.height=4}
+if (pca_loading_ready && has_pc3_load) {
+  print(plot_pc_loading(pv2, "abs_PC3", thr3, "PC3", x_scale))
+}
+```
+
+### PC3 regions above 99.9th-percentile cutoff
+
+```{r pca-loading-table-pc3, echo=FALSE}
+if (pca_loading_ready && has_pc3_load) {
+  knitr::kable(
+    utils::head(pc3_regions[, intersect(window_table_cols, names(pc3_regions))], 20),
+    digits = 4,
+    caption = "PC3: unique SNPs with |PC3| at or above the 99.9th percentile, merged at 1 Mb"
+  )
+}
+```
+
+### Spike-body windows (|loading| ≥ 2, 1 Mb merge)
+
+These tables match spikes that are visible on the plot but often missing from the 99.9th-percentile tables. `n_compact_250kb` = windows shorter than 250 kb. `n_multiSNP_lt_1Mb` = at least 5 SNPs and span &lt; 1 Mb.
+
+```{r pca-loading-window-summary, echo=FALSE}
+if (pca_loading_ready && exists("loading_window_summary")) {
+  knitr::kable(
+    loading_window_summary,
+    caption = "How concentrated are |PC| ≥ 2 windows? (PC2 vs PC3)"
+  )
+}
+```
+
+```{r pca-loading-windows-pc2, echo=FALSE}
+if (pca_loading_ready) {
+  knitr::kable(
+    utils::head(pc2_windows[, intersect(window_table_cols, names(pc2_windows))], 25),
+    digits = 4,
+    caption = "PC2 spike-body windows (|PC2| ≥ 2, 1 Mb merge); top 25 by SNP count"
+  )
+}
+```
+
+```{r pca-loading-windows-pc3, echo=FALSE}
+if (pca_loading_ready && has_pc3_load) {
+  knitr::kable(
+    utils::head(pc3_windows[, intersect(window_table_cols, names(pc3_windows))], 25),
+    digits = 4,
+    caption = "PC3 spike-body windows (|PC3| ≥ 2, 1 Mb merge); top 25 by SNP count"
   )
 }
 ```

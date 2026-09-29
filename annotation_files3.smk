@@ -59,13 +59,14 @@ rule first_variant_annotation:
         singularity run --pwd "$PWD" -B "$PWD":"$PWD" -H "$PWD":"$PWD" \
         --bind /home/bwubb/resources:/opt/vep/resources \
         --bind /home/bwubb/.vep:/opt/vep/.vep \
-        /appl/containers/vep112.sif vep \
+        /appl/containers/ensembl-vep_release_116.0.sif vep \
         --dir /opt/vep/.vep \
         -i $PWD/{input} \
         -o $PWD/{output} \
         --force_overwrite \
         --offline \
         --cache \
+        --cache_version 116 \
         --format vcf \
         --vcf --everything --canonical --mane \
         --assembly GRCh38 \
@@ -79,7 +80,8 @@ rule first_variant_annotation:
         --plugin UTRAnnotator,/opt/vep/.vep/Plugins/UTRannotator/uORF_5UTR_GRCh38_PUBLIC.txt \
         --custom /opt/vep/.vep/clinvar/vcf_GRCh38/clinvar.autogvp.vcf.gz,ClinVar,vcf,exact,0,CLNSIG,CLNREVSTAT,CLNDN,AutoGVP \
         --plugin AlphaMissense,file=/opt/vep/.vep/alphamissense/AlphaMissense_GRCh38.tsv.gz \
-        --plugin MaveDB,file=/opt/vep/.vep/mavedb/MaveDB_variants.tsv.gz
+        --plugin MaveDB,file=/opt/vep/.vep/mavedb/MaveDB_variants.tsv.gz \
+        --plugin LoF,loftee_path:/opt/vep/.vep/Plugins/loftee/,human_ancestor_fa:/opt/vep/.vep/Plugins/loftee/GRCh38/human_ancestor.fa.gz,conservation_file:/opt/vep/.vep/Plugins/loftee/GRCh38/loftee.sql,gerp_bigwig:/opt/vep/.vep/Plugins/loftee/GRCh38/gerp_conservation_scores.homo_sapiens.GRCh38.bw
         """
 
 rule parse_first_variant_annotation:
@@ -165,7 +167,7 @@ rule count_variant_types_postmnp:
         echo "OTHER $(bcftools view -v other -H {input.bcf} | wc -l)" >> {output}
         """
 
-# Drop variants flagged by rare_variant_qc (per-chr TSV) before annotation PGEN / counts.
+# Drop rare_variant_qc flags (optional). Long-LD stays in the ExWAS callset.
 rule bcftools_exclude_rare_variant_qc_flags:
     input:
         bcf="data/bcftools/chr{CHR}.site-qc.het_miss.mnp.gt.bcf",
@@ -175,10 +177,6 @@ rule bcftools_exclude_rare_variant_qc_flags:
         bcf="data/bcftools/chr{CHR}.site-qc.het_miss.mnp.gt.rv-qc.bcf",
         vep="data/bcftools/chr{CHR}.site-qc.het_miss.no_sample.vep.mnp.rv-qc.vcf",
     params:
-        # The exclusion list is always built (input dependency above). Whether it is
-        # actually applied is gated by config rare_variant_qc.apply_exclusions (default False),
-        # so you can flip it on later without re-running the QC. When False, variants pass
-        # through unchanged.
         excl=lambda wildcards, input: ("-e 'ID=@%s'" % input.ids
               if config.get("rare_variant_qc",{}).get("apply_exclusions",False) else "")
     shell:

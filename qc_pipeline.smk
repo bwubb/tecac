@@ -61,6 +61,7 @@ rule generate_qc_report:
         variant_hardy=expand("data/plink/chr{CHR}.site-qc.var-qc.hardy",CHR=CHROMOSOMES_AUTOSOMAL),
         postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         mnp_validation_metrics="data/mnp/mnp.validation.metrics.tsv",
+        cohort_af="data/qc/reports/build_af_tecac_vs_pmbb.tsv",
     output:
         dated=f"exwas_qc_report.{DATE}.html",
     params:
