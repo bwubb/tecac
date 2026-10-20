@@ -36,21 +36,19 @@ digraph qc_workflow {
   
   input [label='Input BCF Files\nPer chromosome (chr1-22, chrX)',fillcolor='#E8F4F8',shape=folder]
   sex_check [label='Step 1: Sex Check (chrX)\nexclude ambiguous samples',fillcolor='#D4EDDA']
-  site_qc [label='Step 2: Site-level QC (select_variants3)\nsite-qc.bcf + site-qc.pgen',fillcolor='#D4EDDA']
+  site_qc [label='Step 2: Site-level QC (select_variants.smk)\nsite-qc.bcf + site-qc.pgen',fillcolor='#D4EDDA']
   build [label='Step 3: Build dataset (build_files)\nvariant QC, sample missingness,\nhet outliers, build.pgen',fillcolor='#D4EDDA']
-  pca [label='Step 4: PCA on build\nbuild_pca.*',fillcolor='#D4EDDA']
-  pca_clean [label='Step 5: PCA outlier filtering\nPC4 > 0.3 + build_pca_clean.*',fillcolor='#D4EDDA']
-  anno_base [label='Step 6: Annotation base\nsite-qc variants + passing samples\nsite-qc.het_miss + first no-sample VEP',fillcolor='#E8F4F8']
-  mnp_branch [label='Step 7: MNP branch (mnp.smk)\nfind/test/read-check/filter\nrewrite MNP GT + MNP VEP',fillcolor='#FFF4E6']
-  anno_rejoin [label='Step 8: Rejoin post-MNP\nmerge adjusted MNP into GT+VEP tracks',fillcolor='#E8F4F8']
-  rv_qc [label='Step 9: Rare variant freeze QC\n(controls-only missingness/carrier)\nflagged IDs + exclusion list',fillcolor='#D4EDDA']
-  anno_final [label='Step 10: Final annotation outputs\nexclude flagged IDs\nannotation pgen + VEP CSV',fillcolor='#A8D5BA',shape=folder]
+  pca [label='Step 4: PCA on build\nbuild_pca.*\n(long-LD + optional AF-delta SNP filters)',fillcolor='#D4EDDA']
+  anno_base [label='Step 5: Annotation base\nsite-qc variants + passing samples\nsite-qc.het_miss + first no-sample VEP',fillcolor='#E8F4F8']
+  mnp_branch [label='Step 6: MNP branch (mnp.smk)\nfind/test/read-check/filter\nrewrite MNP GT + MNP VEP',fillcolor='#FFF4E6']
+  anno_rejoin [label='Step 7: Rejoin post-MNP\nmerge adjusted MNP into GT+VEP tracks',fillcolor='#E8F4F8']
+  rv_qc [label='Step 8: Rare variant freeze QC\n(controls-only missingness/carrier)\nflagged IDs + exclusion list',fillcolor='#D4EDDA']
+  anno_final [label='Step 9: Final annotation outputs\nexclude flagged IDs\nannotation pgen + VEP CSV',fillcolor='#A8D5BA',shape=folder]
   
   input -> sex_check
   sex_check -> site_qc
   site_qc -> build
   build -> pca
-  pca -> pca_clean
   site_qc -> anno_base
   build -> anno_base
   anno_base -> mnp_branch
@@ -228,7 +226,7 @@ Identify samples with excessive missing genotypes after removal of low-quality v
 
 - **Calculation**: Aggregate sample missingness across autosomes (chr1-22 only)
 - **Threshold**: F_MISS > 0.01 (1% missingness, MIND threshold)
-- **Tool**: Python script `aggregate_missingness.py`
+- **Tool**: Python script `qc_aggregate_missingness.py`
 - **Input**: Per-chromosome missingness files from filtered variants
 
 ### Sample Selection Criteria
@@ -259,10 +257,9 @@ Identify samples with abnormal heterozygosity rates indicating sample contaminat
 
 ### Method
 
-- **Calculation**: Per-chromosome heterozygosity using PLINK2 `--het`
-- **Aggregation**: Combine Fhat estimates across autosomes (chr1-22)
-- **Tool**: Python script `aggregate_heterozygosity.py`
-- **Threshold**: Samples with |Fhat| > 3 standard deviations from mean
+- **Calculation**: PLINK2 `--het` on the LD-pruned, mind-passing merge
+- **Tool**: Python script `qc_het_outliers.py`
+- **Threshold**: mean ± 3 SD on F
 
 ### Heterozygosity Interpretation
 
@@ -505,8 +502,8 @@ Summary statistics for final dataset:
 
 ## Custom Scripts
 
-- `aggregate_missingness.py`: Combine per-chromosome sample missingness using argparse
-- `aggregate_heterozygosity.py`: Combine per-chromosome heterozygosity using argparse
+- `qc_aggregate_missingness.py`: Combine per-chromosome sample missingness using argparse
+- `qc_het_outliers.py`: Flag heterozygosity outliers from the merged PLINK .het file
 
 ## Computational Environment
 

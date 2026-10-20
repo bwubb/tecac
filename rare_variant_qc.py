@@ -1,3 +1,9 @@
+"""Controls-only freeze differential missingness and carrier tests, per variant.
+
+Called from rare_variant_qc.smk. A variant is flagged if any freeze pair trips a threshold.
+The exclusion list is written either way; annotation applies it only when
+rare_variant_qc.apply_exclusions is true.
+"""
 import argparse
 import csv
 import math

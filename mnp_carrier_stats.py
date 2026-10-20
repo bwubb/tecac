@@ -2,7 +2,7 @@
 """Per-MNP case/control carrier stats + validation targeting, for threshold choice.
 
 "Carrier" = VAF-cis carrier (a row in the PASS file), i.e. "possibly has the MNP"
-before CRAM read-check. Case PASS files (test_mnp_sample_info --sample-list case.list)
+before CRAM read-check. Case PASS files (mnp_test_sample_info.py --sample-list case.list)
 contain all carrier rows (case + control) for every pair with >=1 case carrier, so
 they alone give both counts per case MNP.
 
@@ -120,12 +120,12 @@ def main():
     ap.add_argument('-o','--output',required=True)
     ap.add_argument('--n-total',type=int,default=None,help='Cohort N for AAF denominator (default cases+controls)')
     ap.add_argument('--passing-samples',default=None,help='File of passing IIDs; its line count sets N_total')
-    ap.add_argument('--read-check',default=None,help='check_mnp_reads results CSV to join per-MNP cis-fraction')
+    ap.add_argument('--read-check',default=None,help='mnp_check_reads.py results CSV to join per-MNP cis-fraction')
     ap.add_argument('--already-samples',nargs='*',default=None,help='Files of control IIDs already downloaded/validated (subtracted from NEW)')
     ap.add_argument('--aaf-max',type=float,default=None,help='If set with the *-out options, write lists for this cohort-AAF cutoff')
     ap.add_argument('--controls-out',default=None,help='Write unique NEW control IIDs to download for --aaf-max (minus --already-samples)')
     ap.add_argument('--targets-out',default=None,help='Write target MNP rows (TSV) for --aaf-max')
-    ap.add_argument('--assignments-out',default=None,help='Write control read-check assignments (mnp_id sample id1 id2) for ALL control carriers of target MNPs (feeds check_mnp_reads)')
+    ap.add_argument('--assignments-out',default=None,help='Write control read-check assignments (mnp_id sample id1 id2) for ALL control carriers of target MNPs (feeds mnp_check_reads.py)')
     args=ap.parse_args()
 
     cases=load_id_list(args.case_list)

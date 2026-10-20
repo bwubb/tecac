@@ -11,11 +11,10 @@
 #   7. Heterozygosity on merge_mind.pruned (pruned SNP set) → merge_mind_pruned.het
 #   8. Identify het outliers from merge_mind_pruned.het → het_exclusions.txt
 #   9. Build = merge_mind minus het outliers → data/preprocess/build.* (final dataset for REGENIE; full variant set, chr8 retained)
-#  10. PCA on build using merge_mind.prune.in, chr 1-7,9-22, long-LD excluded (defensive) → build_pca.eigenvec/.eigenval
+#  10. PCA on build using merge_mind.prune.in, chr 1-7,9-22, long-LD + optional AF-delta IDs excluded → build_pca.*
 # =============================================================================
-#needs aggregate_missingness.py
-#needs het_outliers.py
-#needs identify_pca_outliers.R
+#needs qc_aggregate_missingness.py
+#needs qc_het_outliers.py
 # Include from main Snakefile: include: "build_files.smk"
 # Expects: config, CHROMOSOMES_AUTOSOMAL, GENO_THR, MAF_THR, HWE_THR, MIND_THR.
 # Main workflow provides: data/plink/chr{CHR}.site-qc.pgen, data/plink/chrX.sex_update.txt.
@@ -72,12 +71,6 @@ rule build_files:
         eigenvec="data/preprocess/build_pca.eigenvec",
         eigenval="data/preprocess/build_pca.eigenval",
         eigenvec_var="data/preprocess/build_pca.eigenvec.allele",
-        pca_outliers="data/qc/exclusions/pca_outliers.txt",
-        pca_outlier_plot="data/qc/reports/pca_outliers_pc1_pc2.png",
-        pca_outlier_report="data/qc/reports/pca_outlier_report.txt",
-        clean_eigenvec="data/preprocess/build_pca_clean.eigenvec",
-        clean_eigenval="data/preprocess/build_pca_clean.eigenval",
-        clean_eigenvec_var="data/preprocess/build_pca_clean.eigenvec.allele",
         prefilter_stats=expand("data/qc/reports/chr{CHR}.prefilter.variant_types.txt", CHR=CHROMOSOMES_AUTOSOMAL),
         postplink_variant_types=expand("data/qc/reports/chr{CHR}.postplink.variant_types.txt", CHR=CHROMOSOMES_AUTOSOMAL),
         postplink_counts=expand("data/qc/reports/chr{CHR}.postplink.variant_count.txt", CHR=CHROMOSOMES_AUTOSOMAL),
@@ -269,7 +262,7 @@ rule aggregate_sample_missingness:
         lsf_out="logs/lsf/aggregate_sample_missingness.o"
     shell:
         """
-        python aggregate_missingness.py --mind-thr {params.mind_thr} --output-aggregated {output.aggregated} --output-exclusions {output.exclusions} --output-report {output.report} {input}
+        python qc_aggregate_missingness.py --mind-thr {params.mind_thr} --output-aggregated {output.aggregated} --output-exclusions {output.exclusions} --output-report {output.report} {input}
         """
 
 # -----------------------------------------------------------------------------
@@ -412,7 +405,7 @@ rule plink2_het_outliers:
         lsf_out="logs/lsf/plink2_het_outliers.o"
     shell:
         """
-        python het_outliers.py {input} --output-exclusions {output.exclusions} --output-report {output.report}
+        python qc_het_outliers.py {input} --output-exclusions {output.exclusions} --output-report {output.report}
         """
 
 # -----------------------------------------------------------------------------
@@ -605,76 +598,6 @@ rule calculate_pca:
             --extract {input.pruned_snps} \
             --exclude range {input.long_ld} \
             --chr 1-7,9-22 \
-            --pca 20 allele-wts --out {params.outputname}
-        fi
-        """
-
-# -----------------------------------------------------------------------------
-# 11. PCA outliers: PC4 > 0.3 on build_pca.eigenvec (see identify_pca_outliers.R).
-#     Writes pca_outliers.txt; pca_outlier_report.txt; pca_outliers_pc1_pc2*.png
-# -----------------------------------------------------------------------------
-rule identify_pca_outliers:
-    input:
-        eigenvec="data/preprocess/build_pca.eigenvec"
-    output:
-        outliers="data/qc/exclusions/pca_outliers.txt",
-        plot="data/qc/reports/pca_outliers_pc1_pc2.png",
-        report="data/qc/reports/pca_outlier_report.txt"
-    resources:
-        lsf_err="logs/lsf/identify_pca_outliers.e",
-        lsf_out="logs/lsf/identify_pca_outliers.o"
-    shell:
-        """
-        Rscript identify_pca_outliers.R \
-        --eigenvec {input.eigenvec} \
-        --outliers {output.outliers} \
-        --plot {output.plot} \
-        --report {output.report}
-        """
-
-# -----------------------------------------------------------------------------
-# 12. Re-run PCA on build after removing pca_outliers.txt.
-#     Output prefix: build_pca_clean
-# -----------------------------------------------------------------------------
-rule calculate_pca_clean:
-    input:
-        pgen="data/preprocess/build.pgen",
-        pvar="data/preprocess/build.pvar",
-        psam="data/preprocess/build.psam",
-        pruned_snps="data/plink/merge_mind.prune.in",
-        pca_outliers="data/qc/exclusions/pca_outliers.txt",
-        long_ld=config.get("input", {}).get("long_ld_bed", "long_ld_regions.bed"),
-        id_excl=af_delta_exclude_input,
-    output:
-        eigenvec="data/preprocess/build_pca_clean.eigenvec",
-        eigenvec_var="data/preprocess/build_pca_clean.eigenvec.allele",
-        eigenval="data/preprocess/build_pca_clean.eigenval"
-    params:
-        inputname="data/preprocess/build",
-        outputname="data/preprocess/build_pca_clean",
-        id_excl_flag=lambda wildcards, input: snp_id_exclude_flag(input.id_excl),
-    resources:
-        lsf_err="logs/lsf/calculate_pca_clean.e",
-        lsf_out="logs/lsf/calculate_pca_clean.o"
-    shell:
-        """
-        if [ -n "{params.id_excl_flag}" ]; then
-          plink2 --pfile {params.inputname} \
-            --extract {input.pruned_snps} \
-            --exclude range {input.long_ld} \
-            --chr 1-7,9-22 \
-            --write-snplist --out data/plink/pca_variants
-          plink2 --pfile {params.inputname} \
-            --extract data/plink/pca_variants.snplist \
-            {params.id_excl_flag} \
-            --remove {input.pca_outliers} \
-            --pca 20 allele-wts --out {params.outputname}
-        else
-          plink2 --pfile {params.inputname} \
-            --extract {input.pruned_snps} \
-            --exclude range {input.long_ld} \
-            --chr 1-7,9-22 \
-            --remove {input.pca_outliers} \
             --pca 20 allele-wts --out {params.outputname}
         fi
         """

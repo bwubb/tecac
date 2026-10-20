@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Summarize MNP validation metrics across candidate,VAF-pass,and read-check stages."""
+"""Summarize MNP validation metrics across candidate, VAF-pass, and read-check stages.
+
+Called from mnp.smk (rule mnp_validation_metrics).
+"""
 import argparse
 import csv
 import sys

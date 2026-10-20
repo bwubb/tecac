@@ -1,13 +1,13 @@
 
-#needs find_mnp_variants.py
-#needs test_mnp_sample_info.py
-#needs filter_mnp_pass_by_read_check.py
-#needs plan_mnp_gt.py
-#needs manage_mnp_gt.py
-#needs check_mnp_reads.py
-#needs choose_mnp_read_check_samples.py
+#needs mnp_find_variants.py
+#needs mnp_test_sample_info.py
+#needs mnp_filter_pass_by_read_check.py
+#needs mnp_plan_gt.py
+#needs mnp_manage_gt.py
+#needs mnp_check_reads.py
+#needs mnp_choose_read_check_samples.py
 #needs mnp_validation_metrics.py
-#needs vep_vcf_parser2.py
+#needs vep_vcf_parser.py
 
 import datetime
 
@@ -62,7 +62,7 @@ rule find_mnp_variants:
         regions="data/mnp/chr{CHR}.regions.txt",
         id_file="data/mnp/chr{CHR}.id.txt"
     shell:
-        "python find_mnp_variants.py -i {input.csv} -o {output.csv} -m no_sample -r {output.regions} -I {output.id_file}"
+        "python mnp_find_variants.py -i {input.csv} -o {output.csv} -m no_sample -r {output.regions} -I {output.id_file}"
 
 rule bcftools_mnp_filter:
     input:
@@ -97,7 +97,7 @@ rule test_mnp_sample_info:
     params:
         sample_list=config.get("input",{}).get("cases","case.list")
     shell:
-        "python test_mnp_sample_info.py -p {input.pairs} -i {input.sample_info} -o {output.pass_out} -f {output.fail_out} --sample-list {params.sample_list} --min-samples 1"
+        "python mnp_test_sample_info.py -p {input.pairs} -i {input.sample_info} -o {output.pass_out} -f {output.fail_out} --sample-list {params.sample_list} --min-samples 1"
 
 
 rule choose_mnp_read_check_samples:
@@ -109,7 +109,7 @@ rule choose_mnp_read_check_samples:
     params:
         case_list=config.get("input",{}).get("cases","case.list")
     shell:
-        "python choose_mnp_read_check_samples.py {input.pass_files} -o {output.assignments} -s {output.samples} --case-list {params.case_list}"
+        "python mnp_choose_read_check_samples.py {input.pass_files} -o {output.assignments} -s {output.samples} --case-list {params.case_list}"
 
 rule check_mnp_reads:
     input:
@@ -123,7 +123,7 @@ rule check_mnp_reads:
         reference="resources/GRCh38_full_analysis_set_plus_decoy_hla.fa",
         min_mapq=20
     shell:
-        "python check_mnp_reads.py "
+        "python mnp_check_reads.py "
         "--targets-tsv {input.assignments} "
         "--bam-table {params.bam_table} "
         "-q {params.min_mapq} "
@@ -154,7 +154,7 @@ rule filter_mnp_pass_by_read_check:
         # records (with unvalidated controls) for common pairs. Empty = no restriction.
         target_mnps=("--target-mnps "+config["mnp"]["target_mnps"]) if config.get("mnp",{}).get("target_mnps") else ""
     shell:
-        "python filter_mnp_pass_by_read_check.py "
+        "python mnp_filter_pass_by_read_check.py "
         "-r {input.read_check} "
         "-i {input.pass_in} "
         "-o {output.pass_out} "
@@ -170,7 +170,7 @@ rule plan_mnp_gt:
     params:
         ref="resources/GRCh38_full_analysis_set_plus_decoy_hla.fa"
     shell:
-        "python plan_mnp_gt.py -i {input.sample_info} -o {output.plan} -r {params.ref}"
+        "python mnp_plan_gt.py -i {input.sample_info} -o {output.plan} -r {params.ref}"
 
 rule subset_mnp_vcf:
     input:
@@ -188,7 +188,7 @@ rule manage_mnp_gt:
     output:
         vcf="data/mnp/chr{CHR}.mnp.pass.gt.vcf"
     shell:
-        "python manage_mnp_gt.py -p {input.plan} -i {input.vcf} -o {output.vcf}"
+        "python mnp_manage_gt.py -p {input.plan} -i {input.vcf} -o {output.vcf}"
 
 rule bcftools_mnp_pass_gt_to_bcf_and_no_sample:
     input:
@@ -257,7 +257,7 @@ rule parse_mnp_gt_vep:
     output:
         csv="data/mnp/chr{CHR}.mnp.pass.no_sample.sorted.vep.report.csv"
     shell:
-        "python vep_vcf_parser2.py -i {input.vcf} -o {output.csv} -m cohort"
+        "python vep_vcf_parser.py -i {input.vcf} -o {output.csv} -m cohort"
 
 rule mnp_validation_metrics:
     input:
@@ -275,10 +275,11 @@ rule mnp_validation_metrics:
         "--read-check {input.read_check} "
         "-o {output.tsv}"
 
-rule mnp_blacklist_from_pairs:
-    input:
-        pairs=expand("data/mnp/chr{CHR}.annotation.mnp.pairs.txt",CHR=range(1,23))
-    output:
-        txt="data/mnp/mnp_blacklist.txt"
-    shell:
-        "awk -F'\\t' 'NF>=2{{print $1\"\\n\"$2}}' {input.pairs} | awk 'NF>0{{print}}' | sort -u > {output.txt}"
+if config.get("mnp",{}).get("correct_genotypes",True):
+    rule mnp_blacklist_from_pairs:
+        input:
+            pairs=expand("data/mnp/chr{CHR}.annotation.mnp.pairs.txt",CHR=range(1,23))
+        output:
+            txt="data/mnp/mnp_blacklist.txt"
+        shell:
+            "awk -F'\\t' 'NF>=2{{print $1\"\\n\"$2}}' {input.pairs} | awk 'NF>0{{print}}' | sort -u > {output.txt}"

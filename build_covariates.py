@@ -34,22 +34,40 @@ def parse_freeze_from_row(row):
 
 
 def load_metadata(metadata_paths):
-    """Map PMBB IID -> freeze int from one or more PARCC CSV files."""
+    """Map sample ID -> freeze. Keys both PMBB_ID and rgc_sample_name when those columns exist."""
     freeze_by_iid={}
     for path in metadata_paths:
         with open(path,newline='') as f:
-            for row in csv.reader(f):
-                if not row:
-                    continue
-                iid=(row[0] or '').strip()
-                if not iid.startswith('PMBB'):
-                    continue
-                fz=parse_freeze_from_row(row)
+            reader=csv.DictReader(f)
+            if not reader.fieldnames:
+                continue
+            names={h.strip().lower(): h for h in reader.fieldnames if h}
+            id_cols=[]
+            for key in ('rgc_sample_name','pmbb_id','iid'):
+                if key in names:
+                    id_cols.append(names[key])
+            freeze_col=names.get('freeze')
+            for row in reader:
+                fz=None
+                if freeze_col and row.get(freeze_col):
+                    m=FREEZE_RE.search(str(row[freeze_col]))
+                    if m:
+                        fz=int(m.group(1))
+                if fz is None:
+                    fz=parse_freeze_from_row(row.values())
                 if fz is None:
                     continue
-                if iid in freeze_by_iid and freeze_by_iid[iid]!=fz:
-                    print(f'Warning: {iid} freeze {freeze_by_iid[iid]} -> {fz} ({path})',file=sys.stderr)
-                freeze_by_iid[iid]=fz
+                keys=[]
+                for col in id_cols:
+                    iid=(row.get(col) or '').strip()
+                    if iid and iid.lower()!='null':
+                        keys.append(iid)
+                if not keys:
+                    continue
+                for iid in keys:
+                    if iid in freeze_by_iid and freeze_by_iid[iid]!=fz:
+                        print(f'Warning: {iid} freeze {freeze_by_iid[iid]} -> {fz} ({path})',file=sys.stderr)
+                    freeze_by_iid[iid]=fz
     return freeze_by_iid
 
 
@@ -88,14 +106,19 @@ def main():
 
     rows=[]
     missing_freeze=[]
+    n_from_meta=0
+    n_default=0
     for iid in samples:
         fid=iid
         if iid in freeze_by_iid:
             freeze=freeze_by_iid[iid]
+            n_from_meta+=1
         elif iid in legacy:
             freeze=legacy[iid]['freeze']
+            n_from_meta+=1
         elif args.default_freeze is not None:
             freeze=args.default_freeze
+            n_default+=1
         else:
             missing_freeze.append(iid)
             continue
@@ -118,6 +141,8 @@ def main():
     print(f'Wrote {len(rows)} samples -> {args.output}',file=sys.stderr)
     print(f'  controls (STATUS=1): {n_ctrl}',file=sys.stderr)
     print(f'  cases    (STATUS=2): {n_case}',file=sys.stderr)
+    print(f'  freeze from metadata: {n_from_meta}',file=sys.stderr)
+    print(f'  freeze from --default-freeze: {n_default}',file=sys.stderr)
     for fz in sorted(by_freeze):
         c=by_freeze[fz]
         print(f'  FREEZE {fz}: {c["ctrl"]} controls, {c["case"]} cases',file=sys.stderr)

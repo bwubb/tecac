@@ -1,8 +1,15 @@
-#needs exwas_qc_report2.Rmd
+# ExWAS QC entry point. Run from the repo root:
+#   snakemake -s qc_pipeline.smk <target> --configfile config.yml
+# Targets: select_variants (site QC), build_files (sample QC, build, PCA),
+#   mnp_before_read_check / mnp_check_and_blacklist (MNP branch),
+#   annotation_files, rare_variant_qc, qc_report, finalize.
+# mnp.correct_genotypes false runs annotation, finalize, and REGENIE
+# on the uncorrected callset. See README.md.
+#needs exwas_qc_report.Rmd
 
-include: "select_variants3.smk"
+include: "select_variants.smk"
 include: "build_files.smk"
-include: "annotation_files3.smk"
+include: "annotation_files.smk"
 
 import os
 import datetime
@@ -49,8 +56,8 @@ rule generate_qc_report:
         miss_report="data/qc/reports/missingness_report.txt",
         het_report="data/qc/reports/het_report.txt",
         het_exclusions="data/qc/exclusions/het_exclusions.txt",
-        pca_eigenvec="data/preprocess/build_pca_clean.eigenvec",
-        pca_eigenval="data/preprocess/build_pca_clean.eigenval",
+        pca_eigenvec="data/preprocess/build_pca.eigenvec",
+        pca_eigenval="data/preprocess/build_pca.eigenval",
         prefilter_stats=expand("data/qc/reports/chr{CHR}.prefilter.variant_types.select_variants.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         postfilter_stats=expand("data/qc/reports/chr{CHR}.postfilter.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
         plink_filter_metrics=expand("data/qc/reports/chr{CHR}.plink_filter_metrics.txt",CHR=CHROMOSOMES_AUTOSOMAL),
@@ -60,7 +67,7 @@ rule generate_qc_report:
         variant_vmiss=expand("data/plink/chr{CHR}.site-qc.var-qc.vmiss",CHR=CHROMOSOMES_AUTOSOMAL),
         variant_hardy=expand("data/plink/chr{CHR}.site-qc.var-qc.hardy",CHR=CHROMOSOMES_AUTOSOMAL),
         postmnp_stats=expand("data/qc/reports/chr{CHR}.postmnp.variant_types.txt",CHR=CHROMOSOMES_AUTOSOMAL),
-        mnp_validation_metrics="data/mnp/mnp.validation.metrics.tsv",
+        mnp_validation_metrics="data/mnp/mnp.validation.metrics.tsv" if config.get("mnp",{}).get("correct_genotypes",True) else [],
         cohort_af="data/qc/reports/build_af_tecac_vs_pmbb.tsv",
     output:
         dated=f"exwas_qc_report.{DATE}.html",
@@ -70,7 +77,7 @@ rule generate_qc_report:
         covariate_file=config.get('input',{}).get('covariates','')
     shell:
         """
-        Rscript -e "suppressWarnings(rmarkdown::render('exwas_qc_report2.Rmd',output_file='{output.dated}',params=list(project='{params.project}',data_dir='{params.data_dir}',covariate_file='{params.covariate_file}')))"
+        Rscript -e "suppressWarnings(rmarkdown::render('exwas_qc_report.Rmd',output_file='{output.dated}',params=list(project='{params.project}',data_dir='{params.data_dir}',covariate_file='{params.covariate_file}')))"
         """
 
 rule final_annotation:
@@ -102,8 +109,8 @@ rule final_build:
         pvar="data/preprocess/build.pvar",
         psam="data/preprocess/build.psam",
         snplist="data/preprocess/build.snplist",
-        eigenvec="data/preprocess/build_pca_clean.eigenvec",
-        eigenval="data/preprocess/build_pca_clean.eigenval"
+        eigenvec="data/preprocess/build_pca.eigenvec",
+        eigenval="data/preprocess/build_pca.eigenval"
     output:
         pgen="data/final/build.pgen",
         pvar="data/final/build.pvar",

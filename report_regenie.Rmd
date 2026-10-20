@@ -36,6 +36,58 @@ h5 { margin-top: 1.1rem; color: #444; }
   margin: 2rem 0 0.6rem 0; padding-top: 0.4rem;
   border-top: 2px solid #d0d7de;
 }
+
+/* rmarkdown caps the page at 1200px and centers it. Use the window, TOC stays fixed on the left. */
+@media (min-width: 768px) {
+  div.main-container {
+    max-width: none !important;
+    width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+  div.main-container > .row {
+    margin-left: 0;
+    margin-right: 0;
+  }
+  div.main-container > .row > .col-sm-4,
+  div.main-container > .row > .col-md-3 {
+    width: 0 !important;
+    max-width: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+  div.tocify {
+    width: 230px !important;
+    max-width: 230px !important;
+    margin-left: 10px !important;
+  }
+  div.toc-content {
+    float: none !important;
+    width: auto !important;
+    max-width: none !important;
+    margin-left: 258px !important;
+    margin-right: 28px !important;
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+  }
+}
+
+/* Scroll boxes: the vertical bar sits on the last column and hides right-aligned digits. */
+div[style*="overflow-y: scroll"] th:last-child,
+div[style*="overflow-y: scroll"] td:last-child {
+  padding-right: 1.35rem !important;
+}
+div[style*="overflow-x: scroll"] > table {
+  margin-bottom: 14px !important;
+}
+
+.toc-content .html-widget,
+.toc-content .grViz {
+  width: 100% !important;
+  max-width: 100% !important;
+}
 </style>
 ```
 
@@ -55,6 +107,7 @@ h5 { margin-top: 1.1rem; color: #444; }
 
 <!-- 
 NOTES TO SELF:
+
 - M1 = pathogenic variants only (LoF level 1)
 - M2 = VUS variants only (LoF level 2) 
 - M3 = pathogenic + VUS variants combined
@@ -67,6 +120,7 @@ NOTES TO SELF:
 - Lambda GC less interpretable in ExWAS due to sparse rare variants
 
 KEY TERMS:
+
 - BETA (Effect Size): Log odds ratio of disease association for alt allele
   * Positive BETA = alt allele increases disease risk
   * Negative BETA = alt allele is protective
@@ -96,6 +150,97 @@ library(DiagrammeR)
 
 # Set consistent theme
 theme_set(theme_minimal(base_size = 13))
+
+# Genomic-control λ (Devlin & Roeder): median(χ²_1) / median(χ²_1 | null).
+# χ² = qchisq(1 - p, df = 1). The null median is qchisq(0.5, 1) ≈ 0.4549.
+# On a -log10(p) QQ this is the median test, near expected -log10(p) = 0.301.
+.p_for_lambda <- function(log10p) {
+  log10p <- as.numeric(log10p)
+  log10p <- log10p[is.finite(log10p) & log10p >= 0]
+  if (!length(log10p)) return(numeric())
+  # 10^(-x) underflows to 0 past ~308; keep a tiny positive p so those tests stay in the set.
+  10^(-pmin(log10p, 300))
+}
+
+.lambda_gc <- function(p) {
+  p <- as.numeric(p)
+  p <- p[is.finite(p) & p > 0 & p <= 1]
+  if (length(p) < 10L) return(NA_real_)
+  median(qchisq(1 - p, df = 1), na.rm = TRUE) / qchisq(0.5, df = 1)
+}
+
+.fmt_lambda <- function(x) {
+  ifelse(is.finite(x), sprintf("%.3f", x), "NA")
+}
+
+.qq_points <- function(log10p) {
+  log10p <- as.numeric(log10p)
+  log10p <- sort(log10p[is.finite(log10p) & log10p >= 0], decreasing = TRUE)
+  n <- length(log10p)
+  if (!n) return(tibble(expected = numeric(), observed = numeric(), exp_p = numeric()))
+  exp_p <- ppoints(n)
+  tibble(
+    expected = -log10(exp_p),
+    observed = log10p,
+    exp_p = exp_p
+  )
+}
+
+.qq_median_row <- function(qq) {
+  if (!nrow(qq)) return(qq[0, , drop = FALSE])
+  one <- function(d) d[which.min(abs(d$exp_p - 0.5)), , drop = FALSE]
+  if ("facet_lab" %in% names(qq)) {
+    return(bind_rows(lapply(split(qq, qq$facet_lab), one)))
+  }
+  one(qq)
+}
+
+.qq_lambda_curve <- function(n, lambda, n_grid = 250L) {
+  if (!is.finite(lambda) || n < 10L) {
+    return(tibble(expected = numeric(), observed = numeric()))
+  }
+  exp_p <- exp(seq(log(max(0.5 / n, 1e-300)), log(0.999), length.out = n_grid))
+  chisq_null <- qchisq(1 - exp_p, df = 1)
+  p_hat <- pchisq(lambda * chisq_null, df = 1, lower.tail = FALSE)
+  tibble(
+    expected = -log10(exp_p),
+    observed = -log10(pmax(p_hat, 1e-300))
+  )
+}
+
+.plot_qq <- function(qq, curve = NULL, med = NULL, title = NULL, subtitle = NULL, xlim = NULL, ylim = NULL) {
+  lim <- max(c(qq$expected, qq$observed), na.rm = TRUE)
+  if (!is.finite(lim) || lim < 1) lim <- 1
+  if (is.null(xlim)) xlim <- c(0, lim)
+  if (is.null(ylim)) ylim <- c(0, lim)
+  p <- ggplot(qq, aes(x = expected, y = observed)) +
+    geom_abline(slope = 1, intercept = 0, color = "grey35", linetype = "dashed", linewidth = 0.55) +
+    geom_point(size = 1.15, alpha = 0.45, color = "#2E86AB")
+  if (!is.null(curve) && nrow(curve) > 0L) {
+    p <- p + geom_line(data = curve, color = "#E07A3D", linewidth = 0.75)
+  }
+  if (!is.null(med) && nrow(med) > 0L) {
+    p <- p + geom_point(data = med, shape = 18, size = 3.4, color = "black")
+  }
+  if ("facet_lab" %in% names(qq)) {
+    p <- p + facet_wrap(~facet_lab, nrow = 1)
+  }
+  p +
+    coord_equal(xlim = xlim, ylim = ylim) +
+    labs(
+      x = expression(Expected ~ -log[10](p)),
+      y = expression(Observed ~ -log[10](p)),
+      title = title,
+      subtitle = subtitle
+    ) +
+    theme(
+      strip.text = element_text(size = 11, face = "bold"),
+      plot.title = element_text(size = 14, face = "bold"),
+      plot.subtitle = element_text(size = 11),
+      axis.title = element_text(size = 12),
+      axis.text = element_text(size = 11)
+    )
+}
 
 # Shared HTML table look (gene col bold; consequence headers readable)
 .fmt_consequence_label <- function(x) {
@@ -313,7 +458,7 @@ if (nzchar(.mask_stats_path)) {
     )
 }
 
-# Prebuilt slim tables from build_regenie_report_tables.py — required
+# Prebuilt slim tables from regenie_build_report_tables.py — required
 .report_prefix <- paste0("data/final/", params$project_name, ".report")
 .pre_top_fp <- paste0(.report_prefix, ".top_genes_ADD.tsv")
 .pre_skat_fp <- paste0(.report_prefix, ".top_genes_SKAT.tsv")
@@ -328,7 +473,7 @@ if (nzchar(.mask_stats_path)) {
 .missing_report <- .required_report_files[!file.exists(.required_report_files)]
 if (length(.missing_report)) {
   stop(
-    "Missing required prebuilt report tables. Run build_regenie_report_tables first.\n",
+    "Missing required prebuilt report tables. Run regenie_build_report_tables.py (Snakemake rule build_regenie_report_tables) first.\n",
     paste(" -", .missing_report, collapse = "\n")
   )
 }
@@ -475,15 +620,9 @@ kable(summary_df, format = "html", col.names = c("Metric", "Count")) %>%
 ### Quality metrics
 
 ```{r quality-metrics,echo=FALSE,message=FALSE,warning=FALSE}
-# Calculate lambda GC for both analyses (finite p in (0,1])
-single_lambda <- {
-  pv <- single_variant$PVAL[is.finite(single_variant$PVAL) & single_variant$PVAL > 0 & single_variant$PVAL < 1]
-  if (length(pv) < 10L) NA_real_ else median(qchisq(1 - pv, 1), na.rm = TRUE) / qchisq(0.5, 1)
-}
-gene_lambda <- {
-  pv <- gene_based_add$PVAL[gene_based_add$TEST == "ADD" & is.finite(gene_based_add$PVAL) & gene_based_add$PVAL > 0 & gene_based_add$PVAL < 1]
-  if (length(pv) < 10L) NA_real_ else median(qchisq(1 - pv, 1), na.rm = TRUE) / qchisq(0.5, 1)
-}
+# λ_GC from the same -log10(p) values the QQ plots draw (1 df, median χ²).
+single_lambda <- .lambda_gc(.p_for_lambda(single_variant$LOG10P))
+gene_lambda <- .lambda_gc(.p_for_lambda(gene_based_add$LOG10P))
 
 # Simple quality metrics (burden ADD only for gene-based rows)
 sig_add_or <- gene_based_add$OR[gene_based_add$PVAL_ADJ < 0.05 & is.finite(gene_based_add$OR)]
@@ -493,15 +632,15 @@ quality_df <- data.frame(
     Metric = c(
         "Significant Single-Variants (p < 2.5e-6)",
         "Significant Burden Tests (ADD, FDR < 0.05)",
-        "Lambda GC (Single-Variant)",
-        "Lambda GC (gene-based ADD only)",
+        "Lambda GC (single-variant)",
+        "Lambda GC (gene-based ADD, pooled across masks and bins)",
         "Max OR (FDR-significant ADD only)"
     ),
     Value = c(
         format(sum(single_variant$LOG10P > 5.60206, na.rm = TRUE), big.mark = ","),
         format(sum(gene_based_add$PVAL_ADJ < 0.05, na.rm = TRUE), big.mark = ","),
-        round(single_lambda, 3),
-        round(gene_lambda, 3),
+        .fmt_lambda(single_lambda),
+        .fmt_lambda(gene_lambda),
         ifelse(is.finite(max_or_sig), format(max_or_sig, nsmall = 2), "—")
     )
 )
@@ -509,6 +648,49 @@ quality_df <- data.frame(
 kable(quality_df, format = "html",
       col.names = c("Quality Metric", "Value")) %>%
     .style_report_kable(font_size = 13, full_width = FALSE, gene_col = 1L)
+```
+
+λ_GC = median(χ²) / 0.4549, with χ² = `qchisq(1 − p, df = 1)` from the reported −log10(p). Under the null the median test has −log10(p) = 0.301. That median is what λ_GC measures. The upper-right of a QQ is the tail.
+
+The pooled gene-based number mixes every mask and AAF bin. The QQ strip labels match the rows below (same function, same p-values).
+
+```{r lambda-by-bin,echo=FALSE,message=FALSE,warning=FALSE,results='asis'}
+thresh_levels <- c("0.01", "0.001", "0.0001", "singleton", "All variants")
+lam_bins <- gene_based_add %>%
+  group_by(MASK, THRESH) %>%
+  summarise(
+    n_tests = sum(is.finite(LOG10P) & LOG10P >= 0),
+    lambda_gc = .lambda_gc(.p_for_lambda(LOG10P)),
+    median_mlog10p = {
+      pv <- .p_for_lambda(LOG10P)
+      if (length(pv) < 10L) NA_real_ else -log10(median(pv))
+    },
+    .groups = "drop"
+  )
+mask_levels <- c("M1", "M2", "M3", "M4")
+extra_mask <- setdiff(unique(as.character(lam_bins$MASK)), mask_levels)
+extra_thresh <- setdiff(unique(as.character(lam_bins$THRESH)), thresh_levels)
+lam_bins <- lam_bins %>%
+  mutate(
+    MASK = factor(as.character(MASK), levels = c(mask_levels, extra_mask)),
+    THRESH = factor(as.character(THRESH), levels = c(thresh_levels, extra_thresh))
+  ) %>%
+  arrange(MASK, THRESH)
+
+lam_view <- lam_bins %>%
+  transmute(
+    Mask = as.character(MASK),
+    `AAF bin` = as.character(THRESH),
+    Tests = format(n_tests, big.mark = ","),
+    `λ_GC` = .fmt_lambda(lambda_gc),
+    `Median −log10(p)` = ifelse(is.finite(median_mlog10p), sprintf("%.3f", median_mlog10p), "NA")
+  )
+
+cat("\n**Gene-based ADD λ_GC by mask and AAF bin** (null median −log10(p) = 0.301)\n\n")
+print(
+  knitr::kable(lam_view, format = "html") %>%
+    .style_report_kable(font_size = 13, full_width = FALSE, gene_col = 1L)
+)
 ```
 
 ## Single-variant results
@@ -613,32 +795,36 @@ print(manhattan_plot)
 
 ### QQ plot
 
-```{r qq-plot,echo=FALSE,message=FALSE,warning=FALSE, fig.cap="Single-variant QQ with genomic inflation (λ) in the subtitle."}
-qq_n <- single_variant %>% filter(is.finite(LOG10P))
-qq_data <- tibble(
-  observed = sort(qq_n$LOG10P, decreasing = TRUE),
-  expected = sort(-log10(ppoints(nrow(qq_n))), decreasing = TRUE)
+```{r qq-plot,echo=FALSE,message=FALSE,warning=FALSE,fig.width=8,fig.height=7.5}
+qq_data <- .qq_points(single_variant$LOG10P)
+single_lambda <- .lambda_gc(.p_for_lambda(single_variant$LOG10P))
+sv_p <- .p_for_lambda(single_variant$LOG10P)
+sv_med <- if (length(sv_p) >= 10L) -log10(median(sv_p)) else NA_real_
+qq_curve <- .qq_lambda_curve(nrow(qq_data), single_lambda)
+qq_med <- .qq_median_row(qq_data)
+qq_sub <- sprintf(
+  "λ_GC = %s    median −log10(p) = %s (null 0.301)    n = %s\nDashed: null. Orange: every χ² multiplied by λ_GC. Diamond: median test.",
+  .fmt_lambda(single_lambda),
+  .fmt_lambda(sv_med),
+  format(nrow(qq_data), big.mark = ",")
 )
-
-lam_txt <- if (exists("single_lambda") && is.finite(single_lambda)) {
-  paste0("λ = ", round(single_lambda, 3))
-} else {
-  "λ = NA (insufficient finite P-values)"
+print(.plot_qq(
+  qq_data, curve = qq_curve, med = qq_med,
+  title = "Single-variant QQ",
+  subtitle = qq_sub
+))
+qq_lim <- max(c(qq_data$expected, qq_data$observed), na.rm = TRUE)
+if (is.finite(qq_lim) && qq_lim > 3.2) {
+  print(.plot_qq(
+    qq_data, curve = qq_curve, med = qq_med,
+    title = "Single-variant QQ, median region",
+    subtitle = "Same points and the same λ_GC, axes limited to 0–3 so the median is visible.",
+    xlim = c(0, 3), ylim = c(0, 3)
+  ))
 }
-
-qq_plot <- ggplot(qq_data, aes(x = expected, y = observed)) +
-    geom_point(alpha = 0.55, color = "#2E86AB") +
-    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-    labs(
-      x = "Expected -log10(p)",
-      y = "Observed -log10(p)",
-      subtitle = lam_txt
-    )
-
-print(qq_plot)
 ```
 
-Deviation from the diagonal at the tail reflects excess signal. **λ** is the median χ² (1 df) inflation vs null (same idea as in the QC report); it is also listed under **Quality metrics**.
+The full plot is square so a slope of 1 is 45 degrees. λ_GC is the value in **Quality metrics**. The zoom is the region that determines it. Points that climb above the orange curve are the tail.
 
 ## Gene-based results
 
@@ -700,78 +886,72 @@ It explicitly excludes `M1/M2` variants and a blacklist of potential MNP-pair ID
 
 OR 95% CI = `exp(BETA ± 1.96×SE)`. Cases/Controls = unique samples carrying ≥1 mask variant in the gene (from prebuilt `*.report.gene_carriers.tsv`).
 
-Prefer prebuilt tables from `build_regenie_report_tables.py` (`data/final/{project}.report.*.tsv`) when present — report only displays.
+Prefer prebuilt tables from `regenie_build_report_tables.py` (`data/final/{project}.report.*.tsv`) when present — report only displays.
 
 ```{r topgenes-add-helper, include=FALSE}
 HTML_THRESH <- c("0.01", "0.001", "singleton")
 CSV_THRESH <- c("0.01", "0.001", "0.0001", "singleton", "All variants")
 
 .qq_gene_add <- function(mask, threshs = HTML_THRESH) {
-  # One QQ per AAF bin for this mask (ADD only), faceted — λ GC labeled on each panel
+  # One QQ per AAF bin (ADD). λ_GC is the same median-χ² function as the quality table.
   dat <- gene_based_add %>%
-    filter(MASK == mask, THRESH %in% threshs, is.finite(PVAL), PVAL > 0, PVAL <= 1) %>%
-    mutate(THRESH = factor(THRESH, levels = threshs))
+    filter(MASK == mask, THRESH %in% threshs, is.finite(LOG10P), LOG10P >= 0) %>%
+    mutate(THRESH = factor(as.character(THRESH), levels = threshs))
   if (nrow(dat) == 0L) {
     cat("_No ADD p-values for QQ: ", mask, "._\n\n", sep = "")
     return(invisible(NULL))
   }
   lam <- dat %>%
-    group_by(THRESH) %>%
+    group_by(THRESH, .drop = FALSE) %>%
     summarise(
       n_tests = n(),
-      lambda = {
-        pv <- PVAL
-        if (length(pv) < 10L) {
-          NA_real_
-        } else {
-          median(qchisq(1 - pv, 1), na.rm = TRUE) / qchisq(0.5, 1)
-        }
-      },
+      lambda = .lambda_gc(.p_for_lambda(LOG10P)),
       .groups = "drop"
     ) %>%
+    filter(n_tests > 0L) %>%
     mutate(
-      lam_lab = ifelse(is.finite(lambda), sprintf("%.3f", lambda), "NA"),
-      facet_lab = sprintf("%s  |  λ = %s", as.character(THRESH), lam_lab)
+      facet_lab = sprintf(
+        "%s   n=%s   λ=%s",
+        as.character(THRESH),
+        format(n_tests, big.mark = ",", trim = TRUE),
+        .fmt_lambda(lambda)
+      )
     )
   panel_levels <- lam$facet_lab[match(threshs, as.character(lam$THRESH))]
   panel_levels <- panel_levels[!is.na(panel_levels)]
-  qq <- dat %>%
-    left_join(lam %>% select(THRESH, facet_lab), by = "THRESH") %>%
-    mutate(facet_lab = factor(facet_lab, levels = panel_levels)) %>%
-    group_by(facet_lab) %>%
-    arrange(PVAL, .by_group = TRUE) %>%
-    mutate(
-      expected = ppoints(n()),
-      observed = PVAL,
-      neglog10_exp = -log10(expected),
-      neglog10_obs = -log10(observed)
-    ) %>%
-    ungroup()
-  lim <- max(qq$neglog10_exp, qq$neglog10_obs, na.rm = TRUE)
-  lim <- max(lim, 1)
+  parts <- lapply(seq_len(nrow(lam)), function(i) {
+    d <- dat %>% filter(as.character(THRESH) == as.character(lam$THRESH[i]))
+    q <- .qq_points(d$LOG10P)
+    q$facet_lab <- lam$facet_lab[i]
+    q
+  })
+  qq <- bind_rows(parts) %>%
+    mutate(facet_lab = factor(facet_lab, levels = panel_levels))
+  curves <- bind_rows(lapply(seq_len(nrow(lam)), function(i) {
+    cv <- .qq_lambda_curve(lam$n_tests[i], lam$lambda[i])
+    if (!nrow(cv)) return(cv)
+    cv$facet_lab <- factor(lam$facet_lab[i], levels = panel_levels)
+    cv
+  }))
+  med <- .qq_median_row(qq)
+  lim <- max(c(qq$expected, qq$observed), na.rm = TRUE)
+  if (!is.finite(lim) || lim < 1) lim <- 1
   cat(sprintf(
-    "\n**ADD burden QQ: %s** (one panel per AAF bin; λ = genomic inflation from median χ²)\n\n",
+    "\n**ADD burden QQ: %s.** λ_GC is the median χ² ratio for that bin (same number as the quality table). Dashed: null. Orange: χ² multiplied by that λ_GC. Diamond: median test.\n\n",
     mask
   ))
-  print(
-    ggplot(qq, aes(x = neglog10_exp, y = neglog10_obs)) +
-      geom_abline(slope = 1, intercept = 0, color = "grey50", linetype = "dashed") +
-      geom_point(size = 1.35, alpha = 0.65, color = "#2E86AB") +
-      facet_wrap(~facet_lab, nrow = 1) +
-      coord_equal(xlim = c(0, lim), ylim = c(0, lim)) +
-      labs(
-        x = expression(Expected ~ -log[10](p)),
-        y = expression(Observed ~ -log[10](p)),
-        title = paste0("Gene-based ADD QQ — ", mask)
-      ) +
-      theme(
-        legend.position = "none",
-        strip.text = element_text(size = 12, face = "bold"),
-        plot.title = element_text(size = 14, face = "bold"),
-        axis.title = element_text(size = 12),
-        axis.text = element_text(size = 11)
-      )
-  )
+  print(.plot_qq(
+    qq, curve = curves, med = med,
+    title = paste0("Gene-based ADD QQ — ", mask)
+  ))
+  if (lim > 3.2) {
+    print(.plot_qq(
+      qq, curve = curves, med = med,
+      title = paste0("Gene-based ADD QQ — ", mask, ", median region"),
+      subtitle = "Same points and the same λ_GC, axes limited to 0–3.",
+      xlim = c(0, 3), ylim = c(0, 3)
+    ))
+  }
   invisible(NULL)
 }
 
@@ -1040,7 +1220,7 @@ render_contrib <- function(mask, thresh, n = 10L) {
 
 #### M1 mask variants (HTML: 0.01 / 0.001 / singleton)
 
-```{r qq-m1-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+```{r qq-m1-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=5.2, results='asis'}
 .qq_gene_add("M1")
 ```
 
@@ -1050,7 +1230,7 @@ for (th in HTML_THRESH) render_contrib("M1", th, n = 10L)
 
 #### M2 mask variants (HTML: 0.01 / 0.001 / singleton)
 
-```{r qq-m2-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+```{r qq-m2-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=5.2, results='asis'}
 .qq_gene_add("M2")
 ```
 
@@ -1060,7 +1240,7 @@ for (th in HTML_THRESH) render_contrib("M2", th, n = 10L)
 
 #### M3 mask variants (HTML: 0.01 / 0.001 / singleton)
 
-```{r qq-m3-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+```{r qq-m3-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=5.2, results='asis'}
 .qq_gene_add("M3")
 ```
 
@@ -1070,7 +1250,7 @@ for (th in HTML_THRESH) render_contrib("M3", th, n = 10L)
 
 #### M4 mask variants (HTML: 0.01 / 0.001 / singleton)
 
-```{r qq-m4-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=4.8, results='asis'}
+```{r qq-m4-add, echo=FALSE, message=FALSE, warning=FALSE, fig.width=12.5, fig.height=5.2, results='asis'}
 .qq_gene_add("M4")
 ```
 
@@ -1665,67 +1845,77 @@ Within each gene mask for a VC test, ultra-rare sites with **MAC ≤ `--vc-MACth
 
 ## Appendix: REGENIE pipeline flowchart
 
-```{r regenie_flowchart, echo=FALSE, fig.height=7}
+QC and PGEN conversion happen before this pipeline. The figure is the REGENIE run that produces this report.
+
+```{r regenie_flowchart, echo=FALSE, out.width="100%"}
 grViz("
 digraph regenie_pipeline {
 
-  graph [rankdir = TB, fontsize = 12, fontname = Helvetica]
-  node [fontname = Helvetica, fontsize = 11, shape = box, style = filled, color = DarkBlue]
+  graph [
+    rankdir = LR,
+    fontsize = 14,
+    fontname = Helvetica,
+    pad = 0.35,
+    nodesep = 0.45,
+    ranksep = 0.7,
+    splines = true
+  ]
+  node [
+    fontname = Helvetica,
+    fontsize = 13,
+    shape = box,
+    style = 'rounded,filled',
+    color = '#1F4E79',
+    fontcolor = black,
+    margin = '0.18,0.12'
+  ]
+  edge [color = '#1F4E79', penwidth = 1.2, arrowsize = 0.8]
 
-  input_vcf [label = 'Multi-chromosome VCF\\nfiles', fillcolor = Khaki, fontcolor = Black, shape = folder]
-  samples [label = 'Sample list', fillcolor = Khaki, fontcolor = Black, shape = note]
-  pheno [label = 'Phenotypes', fillcolor = Khaki, fontcolor = Black, shape = note]
-  covar [label = 'Covariates', fillcolor = Khaki, fontcolor = Black, shape = note]
+  inputs [
+    label = 'QC inputs\\nAnnotation PGEN, per chromosome\\nVEP reports\\nSamples, phenotype, covariates',
+    fillcolor = '#F6E7B4',
+    shape = folder
+  ]
+  step1_vars [
+    label = 'Step 1 variant list\\nCommon-variant build PGEN\\nLong-LD regions removed',
+    fillcolor = '#EEEEEE'
+  ]
+  masks [
+    label = 'Mask build\\nM1 pathogenic\\nM2 VUS\\nM3 pathogenic + VUS\\nM4 synonymous negative control\\nCHEK2 missense removed from all masks\\nMNP blacklist applied to M4',
+    fillcolor = '#D6EBFF'
+  ]
+  step1 [
+    label = 'REGENIE Step 1\\nOne null model, whole genome\\nCovariates: freeze, ancestry PCs when used',
+    fillcolor = '#F8E1EA'
+  ]
+  step2_single [
+    label = 'Step 2 single-variant\\nChromosomes 1–22, in parallel\\nFirth  ·  minMAC 1',
+    fillcolor = '#E3F6E8'
+  ]
+  step2_gene [
+    label = 'Step 2 gene-based\\nChromosomes 1–22, in parallel\\nADD burden + SKAT / SKATO\\nAAF bins 0.01, 0.001, 0.0001, singleton\\nminMAC 1 on the finished mask\\nvc-MACthr 10 (SKAT family only)',
+    fillcolor = '#E3F6E8'
+  ]
+  tables [
+    label = 'Report tables\\nTop genes, mask variants,\\ncase and control carriers',
+    fillcolor = '#FFF3C4'
+  ]
+  report [
+    label = 'HTML report\\nQQ, Manhattan, gene tables',
+    fillcolor = '#E7F1FA',
+    shape = note
+  ]
 
-  preprocess [label = 'VCF Preprocessing\\n(normalize, filter, QC)', fillcolor = LightSkyBlue]
-  pgen_convert [label = 'Convert to PLINK2\\nPGEN format', fillcolor = LightSkyBlue]
-
-  step1_chr1 [label = 'Step 1\\nChr 1\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
-  step1_chr_ellipsis [label = '...', fillcolor = LavenderBlush, shape = parallelogram]
-  step1_chr22 [label = 'Step 1\\nChr 22\\n(covariate adjustment)', fillcolor = LavenderBlush, shape = parallelogram]
-
-  merge_step1 [label = 'Merge Step 1\\nresults', fillcolor = MistyRose, shape = diamond]
-
-  step2_single [label = 'Step 2 Single-Variant\\nAssociation Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
-  step2_gene [label = 'Step 2 Gene-Based\\nAssociation Testing\\nChr 1-22', fillcolor = HoneyDew, shape = parallelogram]
-
-  vep_annotate [label = 'VEP Annotation\\n(pathogenic/VUS variants)', fillcolor = LemonChiffon]
-  report_gen [label = 'Generate HTML Report\\n(statistics, plots, tables)', fillcolor = AliceBlue, shape = note]
-
-  input_vcf -> preprocess
-  samples -> preprocess
-  preprocess -> pgen_convert
-  preprocess -> vep_annotate
-
-  pgen_convert -> step1_chr1
-  pgen_convert -> step1_chr_ellipsis
-  pgen_convert -> step1_chr22
-
-  step1_chr1 -> merge_step1 [style = dotted]
-  step1_chr_ellipsis -> merge_step1 [style = dotted]
-  step1_chr22 -> merge_step1 [style = dotted]
-
-  merge_step1 -> step2_single
-  merge_step1 -> step2_gene
-  vep_annotate -> step2_gene
-
-  step2_single -> report_gen
-  step2_gene -> report_gen
-
-  {rank = same; step1_chr1; step1_chr_ellipsis; step1_chr22}
-  {rank = same; step2_single; step2_gene}
-
-  subgraph cluster_parallel {
-    label = 'Parallel Processing\\n(Chromosome-level)'
-    fontsize = 14
-    style = filled
-    fillcolor = WhiteSmoke
-    step1_chr1
-    step1_chr_ellipsis
-    step1_chr22
-    step2_single
-    step2_gene
-  }
+  inputs -> step1_vars
+  inputs -> masks
+  step1_vars -> step1
+  step1 -> step2_single
+  step1 -> step2_gene
+  masks -> step2_gene
+  step2_single -> tables
+  step2_gene -> tables
+  masks -> tables [style = dashed]
+  tables -> report
 }
-")
+", width = "100%", height = "640px")
 ```

@@ -1,0 +1,62 @@
+# Copy to config.yml and point the paths at this machine. config.yml stays local.
+# Run Snakemake from the repo root: snakemake -s qc_pipeline.smk --configfile config.yml
+
+project:
+  name: PROJECT
+
+input:
+  chromosomes:
+    chr1: /path/to/chr1.bcf
+    chr2: /path/to/chr2.bcf
+    chr3: /path/to/chr3.bcf
+    chr4: /path/to/chr4.bcf
+    chr5: /path/to/chr5.bcf
+    chr6: /path/to/chr6.bcf
+    chr7: /path/to/chr7.bcf
+    chr8: /path/to/chr8.bcf
+    chr9: /path/to/chr9.bcf
+    chr10: /path/to/chr10.bcf
+    chr11: /path/to/chr11.bcf
+    chr12: /path/to/chr12.bcf
+    chr13: /path/to/chr13.bcf
+    chr14: /path/to/chr14.bcf
+    chr15: /path/to/chr15.bcf
+    chr16: /path/to/chr16.bcf
+    chr17: /path/to/chr17.bcf
+    chr18: /path/to/chr18.bcf
+    chr19: /path/to/chr19.bcf
+    chr20: /path/to/chr20.bcf
+    chr21: /path/to/chr21.bcf
+    chr22: /path/to/chr22.bcf
+    chrX: /path/to/chrX.bcf
+  samples: samples.list          # one sample ID per line, or FID IID
+  targets: targets.bed           # capture regions for bcftools view -R
+  covariates: covariates.txt     # header: FID IID FREEZE STATUS (1=control, 2=case). See build_covariates.py
+  cases: case.list               # MNP read-check prefers cases
+  controls: controls.txt         # used only if covariates has no STATUS column
+  ancestry_file: data/preprocess/build_pca.eigenvec
+  anc_group: anc_group.tsv       # FID IID AncGroup, for the QC report PCA plots
+  long_ld_bed: long_ld_regions.bed
+
+qc:
+  geno_thr: 0.01
+  maf_thr: 0.05
+  hwe_thr: 1.0e-6
+  mind_thr: 0.05
+  ld_thr: "200 20 0.2"           # plink2 --indep-pairwise
+  af_delta_thr: 0.0              # 0 disables the TECAC vs PMBB AF exclude list
+
+mnp:
+  # true: CRAM-check case carriers and rewrite those genotypes. false: no read-check,
+  # no genotype rewrite, empty M4 blacklist. annotation_files, finalize, and run_regenie still run.
+  correct_genotypes: true
+  bam_table: mnp_bam.table       # sample<TAB>cram, for mnp_check_reads.py
+  per_sample: true               # rewrite GT only for samples that were read-checked
+  # target_mnps: data/mnp/mnp_targets.tsv   # optional id1,id2 list from mnp_carrier_stats.py --targets-out
+
+regenie:
+  dm_count: 5                   # ancestry columns after IID. 0 = FREEZE only, no PCs
+  gene_consequence_exclude: mask_gene_consequence_exclude.txt
+
+rare_variant_qc:
+  apply_exclusions: false        # true drops flagged rare variants from the annotation BCF

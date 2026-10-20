@@ -11,12 +11,14 @@ This report performs **freeze-bias QC for rare variants in controls only**, comp
 **all freezes pairwise** (a variant is flagged if any freeze pair trips a threshold).
 
 Why this is needed:
+
 - Separate technical freeze/batch effects from true disease signal.
 - If callability differs by freeze (e.g. one freeze has more missing genotypes), a variant
   can look associated downstream for technical reasons.
 - Controls-only comparison avoids mixing real case enrichment into the batch check.
 
 What this report tests per variant (across every freeze pair present):
+
 - **Differential missingness by freeze** (Fisher's exact + absolute rate differences).
 - **Differential carrier rate by freeze** among called controls (Fisher's exact + absolute differences).
 

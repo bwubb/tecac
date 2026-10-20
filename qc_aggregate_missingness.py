@@ -1,0 +1,38 @@
+"""Aggregate per-chromosome PLINK .smiss files and write MIND exclusions.
+
+Called from build_files.smk (rule aggregate_sample_missingness).
+"""
+import pandas as pd
+import argparse
+
+p=argparse.ArgumentParser(description="Aggregate and filter sample missingness across multiple input files.")
+p.add_argument("input_files",nargs='+',help="Input missingness summary files")
+p.add_argument("--mind-thr",type=float,required=True,help="Missingness threshold (F_MISS > mind_thr will be excluded)")
+p.add_argument("--output-aggregated",required=True,help="Output file for aggregated missingness per sample")
+p.add_argument("--output-exclusions",required=True,help="Output file for sample exclusions (exceeding missingness)")
+p.add_argument("--output-report",required=True,help="Output QC report file")
+
+args=p.parse_args()
+
+input_files=args.input_files
+mind_thr=args.mind_thr
+output_aggregated=args.output_aggregated
+output_exclusions=args.output_exclusions
+output_report=args.output_report
+
+# plink2 .smiss has #FID and IID (double ID); use IID for sample key
+id_col='IID' if 'IID' in pd.read_csv(input_files[0],sep='\s+',nrows=0).columns else '#IID'
+dfs=[]
+for f in input_files:
+    df=pd.read_csv(f,sep='\s+')
+    dfs.append(df[[id_col,'MISSING_CT','OBS_CT']])
+
+combined=pd.concat(dfs)
+agg=combined.groupby(id_col).sum().reset_index()
+agg['F_MISS']=agg['MISSING_CT']/agg['OBS_CT']
+
+agg.to_csv(output_aggregated,sep='\t',index=False)
+
+high_miss=agg[agg['F_MISS']>mind_thr]
+high_miss[id_col].to_csv(output_exclusions,sep=' ',index=False,header=False)
+high_miss[[id_col,'F_MISS']].to_csv(output_report,sep=',',index=False,header=True)
