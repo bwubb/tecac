@@ -1,6 +1,6 @@
 ---
 title: "REGENIE Exome-Wide Association Analysis Report"
-author: "Brad Wubbenhorst"
+author: "[Your Name Here]"
 output:
   html_document:
     theme: paper
