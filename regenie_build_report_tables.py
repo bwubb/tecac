@@ -28,7 +28,7 @@ def get_args():
     p.add_argument('--snplist-glob',required=True,help='Glob for *_masks.snplist files')
     p.add_argument('--mask-stats',required=True,help='mask_variant_stats.tsv (full, may be large)')
     p.add_argument('--out-prefix',required=True,help='Output prefix (no extension)')
-    p.add_argument('--top-n',type=int,default=20,help='Top N genes per mask×bin for contrib/CSV')
+    p.add_argument('--top-n',type=int,default=30,help='Top N genes per mask×bin for contrib/CSV')
     p.add_argument('--html-n',type=int,default=10,help='Mark top N for HTML bins')
     p.add_argument('--pheno',default='',help='REGENIE pheno (FID IID STATUS); needed for unique gene carriers')
     p.add_argument('--pfile-template',default='data/preprocess/chr{CHR}.annotation',

@@ -8,6 +8,7 @@ import os
 import csv
 import argparse
 from collections import defaultdict
+from itertools import combinations
 import re
 
 GT_MAPPING={'0/0':'HOM_REF','0/1':'HET_ALT','1/0':'HET_ALT','1/1':'HOM_ALT'}
@@ -187,9 +188,15 @@ class GnomadAnnot:
             field_name=f'gnomAD.{pop}'
             g_value=CSQ.get(f'gnomADg{suffix}','.')
             e_value=CSQ.get(f'gnomADe{suffix}','.')
+            # VEP 116 / gnomAD v4 renamed OTH -> REMAINING
+            if pop=='OTH':
+                if g_value in ['.','']:
+                    g_value=CSQ.get('gnomADg_REMAINING_AF','.')
+                if e_value in ['.','']:
+                    e_value=CSQ.get('gnomADe_REMAINING_AF','.')
             self.fields[field_name]=g_value if g_value!='.' else e_value
-        self.fields['gnomAD.MAX_AF']=CSQ.get('MAX_AF','.')
-        self.fields['gnomAD.MAX_POPS']=CSQ.get('MAX_AF_POPS','.')
+        self.fields['MAX_AF']=CSQ.get('MAX_AF','.')
+        self.fields['MAX_AF_POPS']=CSQ.get('MAX_AF_POPS','.')
 
 class ClinvarAnnot:
     def clinvar(self,CSQ):
@@ -212,7 +219,8 @@ class AutoGVPAnnot:
 class SpliceAIAnnot:
     def splice_ai(self,CSQ):
         for m in SPLICEAI_METRICS:
-            self.fields[f'SpliceAI.DS_{m}']=CSQ[f'SpliceAI_pred_DS_{m}']
+            val=CSQ.get(f'SpliceAI_pred_DS_{m}','.')
+            self.fields[f'SpliceAI.DS_{m}']=val if val not in [None,''] else '.'
 
 class PredictionAnnot:
     def snv_prediction(self,CSQ):
@@ -237,12 +245,31 @@ class MaveDBAnnot:
             ('MaveDB.urn','MaveDB_urn')
         ]
         for field,csq_key in fields:
-            self.fields[field]=CSQ.get(csq_key,'.')
+            val=CSQ.get(csq_key,'.')
+            self.fields[field]=val if val not in [None,''] else '.'
+
+class LofteeAnnot:
+    def loftee(self,CSQ):
+        # LOFTEE plugin CSQ names; absent from Format => '.'
+        fields=[
+            ('LOFTEE.lof','LoF'),
+            ('LOFTEE.filter','LoF_filter'),
+            ('LOFTEE.flags','LoF_flags'),
+            ('LOFTEE.info','LoF_info')
+        ]
+        for field,csq_key in fields:
+            val=CSQ.get(csq_key,'.')
+            self.fields[field]=val if val not in [None,''] else '.'
 
 class MANEAnnot:
     def mane(self,CSQ):
-        self.fields['MANE.Select']=CSQ.get('MANE_SELECT','.')
-        self.fields['MANE.PlusClinical']=CSQ.get('MANE_PLUS_CLINICAL','.')
+        # MANE is the VEP 116 flag; MANE_SELECT / MANE_PLUS_CLINICAL are the RefSeq IDs
+        self.fields['MANE.Select']=CSQ.get('MANE_SELECT') or '.'
+        self.fields['MANE.PlusClinical']=CSQ.get('MANE_PLUS_CLINICAL') or '.'
+        if self.fields['MANE.Select']=='':
+            self.fields['MANE.Select']='.'
+        if self.fields['MANE.PlusClinical']=='':
+            self.fields['MANE.PlusClinical']='.'
 
 class BasicInfoAnnot:
     def info(self,CSQ):
@@ -300,9 +327,9 @@ class LofLevelAnnot:
             return (condition_zero(self.fields['Bio.type']) and
                    (condition_one(self.fields['AutoGVP']) or
                     (condition_two(self.fields['Variant.Consequence'],self.fields['EXON']) and
-                     condition_three(self.fields['gnomAD.MAX_AF'])) or
+                     condition_three(self.fields['MAX_AF'])) or
                     (condition_four(self.fields['Variant.Consequence'],self.fields['HGVSc']) and
-                     condition_three(self.fields['gnomAD.MAX_AF']))))
+                     condition_three(self.fields['MAX_AF']))))
 
         def check_level_two():
             def condition_zero(bt):
@@ -321,7 +348,15 @@ class LofLevelAnnot:
             
             def condition_four(vc,ai):
                 if 'splice' in vc:
-                    return any(float(i)>0.5 for i in ai if i not in ['','.'])
+                    scores=[]
+                    for i in ai:
+                        if i in ['','.',None]:
+                            continue
+                        try:
+                            scores.append(float(i))
+                        except (TypeError,ValueError):
+                            continue
+                    return any(s>0.5 for s in scores)
                 return True
             def condition_five(vc,hgvsp):
                 if 'inframe' not in vc:
@@ -360,7 +395,7 @@ class LofLevelAnnot:
 
 
 class VEPannotation(BasicInfoAnnot,MANEAnnot,GnomadAnnot,ClinvarAnnot,SpliceAIAnnot,
-                   PredictionAnnot,AlphaMissenseAnnot,MaveDBAnnot,
+                   PredictionAnnot,AlphaMissenseAnnot,MaveDBAnnot,LofteeAnnot,
                    SampleAnnot,TumorNormalAnnot,LofLevelAnnot):
     """
     Main class for parsing VEP-annotated VCF files.
@@ -510,12 +545,13 @@ def report_header(tumor_normal=False,no_caller=False):
     # All additional annotations
     header+=['SpliceAI.DS_AG','SpliceAI.DS_AL','SpliceAI.DS_DG','SpliceAI.DS_DL',  # SpliceAI
             'REVEL',  # SNV prediction
-            'gnomAD.AF','gnomAD.AFR','gnomAD.AMR','gnomAD.ASJ','gnomAD.EAS','gnomAD.FIN','gnomAD.NFE','gnomAD.OTH','gnomAD.SAS','gnomAD.MAX_AF','gnomAD.MAX_POPS',  # gnomAD
+            'gnomAD.AF','gnomAD.AFR','gnomAD.AMR','gnomAD.ASJ','gnomAD.EAS','gnomAD.FIN','gnomAD.NFE','gnomAD.OTH','gnomAD.SAS',  # gnomAD
+            'MAX_AF','MAX_AF_POPS',  # VEP max AF across all freq sources (gnomAD, 1KG, ESP, etc.)
             'ClinVar','ClinVar.SIG','ClinVar.REVSTAT','ClinVar.DN',  # ClinVar
             'AutoGVP',  # AutoGVP
             'AM.class','AM.pathogenicity',  # AlphaMissense
-            'MaveDB.nt','MaveDB.pro','MaveDB.score','MaveDB.urn']  # MaveDB
-            #'LOFTEE.lof','LOFTEE.filter','LOFTEE.flags','LOFTEE.info',  # LOFTEE doesnt work!
+            'MaveDB.nt','MaveDB.pro','MaveDB.score','MaveDB.urn',  # MaveDB
+            'LOFTEE.lof','LOFTEE.filter','LOFTEE.flags','LOFTEE.info']  # LOFTEE; '.' if not in ANN Format
 
     # Genotype information
     if tumor_normal:
@@ -529,6 +565,32 @@ def report_header(tumor_normal=False,no_caller=False):
         header+=CALLER_TOOLS
 
     return header
+
+
+def describe_ann_header(ann_header):
+    """Show which plugin fields the VCF Format line actually named.
+
+    Downstream lookup is always by these names. If a plugin is in the VEP
+    command but missing here, zip() cannot map it and extra pipes will shift
+    later fields.
+    """
+    names=set(ann_header)
+    print("ANN Format field map (values are assigned by name from this list):")
+    for label,key in [
+        ('MANE flag','MANE'),
+        ('MANE_SELECT','MANE_SELECT'),
+        ('MANE_PLUS_CLINICAL','MANE_PLUS_CLINICAL'),
+        ('MaveDB_nt','MaveDB_nt'),
+        ('MaveDB_pro','MaveDB_pro'),
+        ('MaveDB_score','MaveDB_score'),
+        ('MaveDB_urn','MaveDB_urn'),
+        ('LOFTEE LoF','LoF'),
+        ('LOFTEE LoF_filter','LoF_filter'),
+        ('LOFTEE LoF_flags','LoF_flags'),
+        ('LOFTEE LoF_info','LoF_info'),
+    ]:
+        print(f"  {label}: {'present' if key in names else 'NOT in Format'}")
+    print(f"  total Format fields: {len(ann_header)}")
 
 
 def gene_list_check(fp):
@@ -596,15 +658,184 @@ def get_args(argv):
     p.add_argument('-m','--mode',default='cohort',help='Run mode determines how calls are reported. Single should be "single,{sample.id}. Tumor/Normal should be "tumor_normal,{tumor.id},{normal.id}" OR use "no_sample"')
     return p.parse_args(argv)
 
+_IMPACTS=frozenset({'HIGH','MODERATE','LOW','MODIFIER'})
+# Format names VEP 116 may list without emitting a matching empty pipe.
+_ANN_GHOST_FIELDS=('GENCODE_PRIMARY','MANE')
+
+def _is_numeric_or_empty(val):
+    if val in ('','.',None):
+        return True
+    try:
+        float(val)
+        return True
+    except (TypeError,ValueError):
+        return False
+
+def _ann_landmarks_ok(d):
+    """True when named CSQ slots hold the kinds of values those names require."""
+    impact=d.get('IMPACT','')
+    if impact and impact not in _IMPACTS:
+        return False
+    if d.get('CANONICAL','') not in ('','YES','.'):
+        return False
+    mane=d.get('MANE','')
+    # MANE is a flag (MANE_Select / MANE_Plus_Clinical). RefSeq IDs belong in MANE_SELECT.
+    if mane.startswith('NM_') or mane.startswith('NR_') or mane.startswith('ENST') or mane.startswith('XM_'):
+        return False
+    mane_sel=d.get('MANE_SELECT','')
+    if mane_sel in ('1','2','3','4','5') or mane_sel.startswith('P1') or mane_sel.startswith('P2') or mane_sel.startswith('CCDS'):
+        return False
+    if not _is_numeric_or_empty(d.get('MAX_AF','.')):
+        return False
+    clin=d.get('CLIN_SIG','.')
+    # A frequency does not belong in CLIN_SIG; 'pathogenic' does.
+    if clin not in ('','.') and _is_numeric_or_empty(clin):
+        return False
+    for m in SPLICEAI_METRICS:
+        if not _is_numeric_or_empty(d.get(f'SpliceAI_pred_DS_{m}','.')):
+            return False
+    return True
+
+def _values_with_header_gaps(header,values,gap_idxs):
+    """Leave named Format slots empty instead of consuming a pipe value.
+
+    Used when VEP lists a field in Format but omits that slot in the ANN payload.
+    Trailing extras (e.g. MaveDB not in Format) are ignored by zip.
+    """
+    gaps=set(gap_idxs)
+    out=[]
+    vi=0
+    for hi in range(len(header)):
+        if hi in gaps:
+            out.append('')
+        elif vi<len(values):
+            out.append(values[vi])
+            vi+=1
+        else:
+            out.append('')
+    return out
+
+def _ann_alignment_dump(header,values,focus='MAX_AF'):
+    try:
+        idx=header.index(focus)
+    except ValueError:
+        idx=0
+    lines=[f"header_fields={len(header)} value_fields={len(values)}"]
+    for i in range(max(0,idx-4),min(len(header),idx+5)):
+        val=values[i] if i<len(values) else '<missing>'
+        lines.append(f"  [{i}] {header[i]}={val!r}")
+    return '\n'.join(lines)
+
+def split_ann_transcripts(ann_value,alt):
+    """Keep one ANN transcript together when a CSQ field itself contains commas.
+
+    vcfpy splits INFO Number=. on commas. Custom ClinVar disease names can still
+    have commas; VEP-native fields use '&'. Glue fragments that are not a new
+    Allele|Consequence|IMPACT record.
+    """
+    if isinstance(ann_value,list):
+        items=[str(v) for v in ann_value]
+    else:
+        items=str(ann_value).split(',')
+    transcripts=[]
+    for item in items:
+        if transcripts and not _is_ann_transcript_start(item,alt):
+            transcripts[-1]+=','+item
+        else:
+            transcripts.append(item)
+    return transcripts
+
+def _is_ann_transcript_start(item,alt):
+    if '|' not in item:
+        return False
+    parts=item.split('|')
+    if len(parts)<3:
+        return False
+    allele=parts[0]
+    if alt and allele==alt and parts[2] in _IMPACTS:
+        return True
+    return bool(re.fullmatch(r'[ACGTNacgtn-]+',allele)) and parts[2] in _IMPACTS
+
+def parse_ann_transcript(ann_header,csq_i,loc=None,_state={'warned':False}):
+    """Map one ANN/CSQ allele string onto the Format field names.
+
+    VEP 116 lists MANE in Format, but some records omit that pipe slot.
+    MaveDB is loaded in the VEP command but is not in Format, so hits can
+    append extra trailing values. Either mismatch shifts MAX_AF onto CLIN_SIG
+    ('pathogenic') or SpliceAI DS_* onto SpliceAI_pred_SYMBOL.
+    Extra pipes are realigned; the variant is never dropped.
+    """
+    header=[h.strip() for h in ann_header]
+    values=csq_i.split('|')
+    if not _state.get('counted'):
+        print(f"ANN Format fields: {len(header)}; first transcript pipe values: {len(values)}")
+        _state['counted']=True
+    mapped=dict(zip(header,values))
+    if _ann_landmarks_ok(mapped):
+        return mapped
+
+    # Reuse a gap pattern that already worked on this file.
+    if _state.get('gaps') is not None:
+        trial=_values_with_header_gaps(header,values,_state['gaps'])
+        mapped=dict(zip(header,trial))
+        if _ann_landmarks_ok(mapped):
+            return mapped
+
+    trials=[]
+    if 'MANE' in header:
+        mane_idx=header.index('MANE')
+        for n in range(1,5):
+            gaps=tuple(range(mane_idx,mane_idx+n))
+            if gaps[-1]>=len(header):
+                break
+            trials.append((f'{n} empty slot(s) at MANE',gaps))
+    ghost_idxs=[header.index(n) for n in _ANN_GHOST_FIELDS if n in header]
+    if 'CANONICAL' in header and 'MAX_AF' in header:
+        optional=list(range(header.index('CANONICAL')+1,header.index('MAX_AF')+1))
+    else:
+        optional=list(ghost_idxs)
+    for n in (1,2):
+        if n>len(optional):
+            break
+        for combo in combinations(optional,n):
+            trials.append((f'empty slots at {",".join(header[i] for i in combo)}',combo))
+
+    seen=set()
+    for label,gaps in trials:
+        if gaps in seen:
+            continue
+        seen.add(gaps)
+        trial=_values_with_header_gaps(header,values,gaps)
+        mapped=dict(zip(header,trial))
+        if _ann_landmarks_ok(mapped):
+            _state['gaps']=gaps
+            if not _state['warned']:
+                where=f' at {loc}' if loc else ''
+                print(f"Warning: ANN Format/value mismatch{where}; realigned by inserting {label}.")
+                print(_ann_alignment_dump(header,values))
+                print('  after realignment:')
+                print(_ann_alignment_dump(header,trial))
+                _state['warned']=True
+            return mapped
+
+    loc_s=f' at {loc}' if loc else ''
+    raise ValueError(
+        "ANN field alignment failed"+loc_s+". MAX_AF must be a frequency; got "
+        f"{dict(zip(header,values)).get('MAX_AF')!r} (that token belongs in CLIN_SIG/ClinVar, not gnomAD).\n"
+        +_ann_alignment_dump(header,values)
+    )
+
 def process_annotation(vep_data,csq_dict,tumor_normal,single,tumor,normal,sample):
     """Process a single annotation and set sample IDs"""
     vep_data.info(csq_dict)
+    vep_data.mane(csq_dict)
     vep_data.snv_prediction(csq_dict)
     vep_data.splice_ai(csq_dict)
     vep_data.gnomAD(csq_dict)
     vep_data.clinvar(csq_dict)
     vep_data.alphamissense(csq_dict)
     vep_data.mavedb(csq_dict)
+    vep_data.loftee(csq_dict)
     vep_data.lof_level()
     
     # Set sample IDs based on mode
@@ -736,6 +967,8 @@ def main(argv=None):
     
     if not ann_header:
         raise ValueError("ANN header not found in VCF file")
+    ann_header=[h.strip() for h in ann_header]
+    describe_ann_header(ann_header)
     
     with open(args.output_csv,'w') as outfile:
         writer=csv.DictWriter(outfile,fieldnames=header,delimiter=',',restval='.',extrasaction='ignore',quoting=csv.QUOTE_NONNUMERIC,dialect='excel')
@@ -818,15 +1051,12 @@ def main(argv=None):
             canonical_found=False
             #Saud had suggested we do high impact even if we don't have a canonical.
             #It may have required another annotation, I dont recall.
-            # vcfpy: ANN is typically a string, but handle list case
-            ann_value=record.INFO['ANN']
-            if isinstance(ann_value,list):
-                ann_value=','.join(str(v) for v in ann_value)
-            else:
-                ann_value=str(ann_value)
-            for csq_i in ann_value.split(','):
-                csq_dict=dict(zip(ann_header,csq_i.split('|')))
-                if csq_dict['SYMBOL']!='' and csq_dict['CANONICAL']=='YES':
+            loc=f"{record.CHROM}:{record.POS}"
+            alt=vep_data.fields.get('ALT','')
+            transcripts=split_ann_transcripts(record.INFO['ANN'],alt)
+            for csq_i in transcripts:
+                csq_dict=parse_ann_transcript(ann_header,csq_i,loc=loc)
+                if csq_dict.get('SYMBOL','')!='' and csq_dict.get('CANONICAL','')=='YES':
                     canonical_found=True
                     if csq_dict.get('IMPACT','MODIFIER')=='HIGH':
                         #All this just seems like it should be in a function...
@@ -846,10 +1076,9 @@ def main(argv=None):
 
             if not high_impact:
                 #Process first canonical for each gene
-                # Use same ann_value from above
-                for csq_i in ann_value.split(','):
-                    csq_dict=dict(zip(ann_header,csq_i.split('|')))
-                    if csq_dict['SYMBOL']!='' and csq_dict['CANONICAL']=='YES':
+                for csq_i in transcripts:
+                    csq_dict=parse_ann_transcript(ann_header,csq_i,loc=loc)
+                    if csq_dict.get('SYMBOL','')!='' and csq_dict.get('CANONICAL','')=='YES':
                         if process_annotation(vep_data,csq_dict,tumor_normal,single,tumor,normal,sample):
                             vep_data.fill_values(header)
                             filter_result=should_report_variant(vep_data,gene_filter,gene_list,region_filter,bed_regions,record,blacklist_filter,blacklist)
@@ -866,7 +1095,7 @@ def main(argv=None):
             # Track skipped variants
             if not canonical_found:
                 skipped_no_canonical+=1
-            elif not any(csq_dict.get('SYMBOL','')!='' for csq_i in ann_value.split(',') for csq_dict in [dict(zip(ann_header,csq_i.split('|')))]):
+            elif not any(parse_ann_transcript(ann_header,csq_i,loc=loc).get('SYMBOL','')!='' for csq_i in transcripts):
                 skipped_no_symbol+=1
 
     VcfReader.close()
